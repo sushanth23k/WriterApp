@@ -8,7 +8,7 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.voicememory.app",
+      "bundleIdentifier": "com.sushanthpanasa.voicememory",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Voice Memory Assistant needs the microphone so you can talk to the assistant.",
         "UIBackgroundModes": ["audio", "voip"]
