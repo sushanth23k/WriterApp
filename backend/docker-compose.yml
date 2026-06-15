@@ -1,0 +1,13 @@
+# Self-hosted LiveKit server for Voice Memory Assistant v2.0 (local dev).
+# Brings up the LiveKit SFU locally; only the AI services (Deepgram, Groq) are remote.
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"        # WebSocket signaling (HTTP)
+      - "7881:7881"        # WebRTC over TCP (fallback)
+      - "7882:7882/udp"    # WebRTC media (single multiplexed UDP port)
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro

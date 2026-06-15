@@ -1,0 +1,30 @@
+# Secrets — never commit
+.env
+**/.env
+!**/.env.example
+
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+
+# Node / Expo
+app/node_modules/
+app/.expo/
+app/dist/
+app/ios/
+app/android/
+npm-debug.*
+*.log
+
+# Encrypted notes DB (v2.0) — never commit
+*.db
+*.db-shm
+*.db-wal
+backend/notes.db
+
+# Local LiveKit dev config holds a dev secret — never commit
+backend/livekit.yaml
+
+# macOS
+.DS_Store

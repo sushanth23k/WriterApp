@@ -1,0 +1,12 @@
+# LiveKit Agents (1.6 line) + plugins
+# LLM = Groq (llama-3.3-70b-versatile); STT/TTS = Deepgram; VAD = Silero
+livekit-agents[deepgram,groq,silero]~=1.6
+livekit-api~=1.0
+
+# Token server
+fastapi
+uvicorn[standard]
+python-dotenv
+
+# v2.0 encrypted notes store (SQLCipher / AES-256 at rest)
+sqlcipher3
