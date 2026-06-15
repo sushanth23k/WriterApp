@@ -95,14 +95,27 @@ function ConversationView({ onEnd }: { onEnd: () => void }) {
       const final = attrs[ATTR_FINAL] === 'true';
 
       let text = '';
+      // Coalesce per-chunk updates to at most one render per frame. Streaming
+      // TTS arrives word-by-word; calling setState on every chunk floods the JS
+      // thread and starves livekit-client's signaling heartbeat, which then
+      // fires a false "ping timeout" and drops the session mid-reply.
+      let pending = false;
+      const flush = () => {
+        pending = false;
+        if (!cancelled) upsert({ id: segmentId, role, text, final });
+      };
       try {
         for await (const chunk of reader) {
           if (cancelled) return;
           text += chunk;
-          upsert({ id: segmentId, role, text, final });
+          if (!pending) {
+            pending = true;
+            requestAnimationFrame(flush);
+          }
         }
-        // Stream complete — keep whatever final flag the attributes carried.
-        upsert({ id: segmentId, role, text, final });
+        // Stream complete — flush the final text + whatever final flag the
+        // attributes carried, regardless of any pending frame.
+        flush();
       } catch (e) {
         console.warn('transcription stream error', e);
       }
