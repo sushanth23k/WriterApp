@@ -1,0 +1,85 @@
+# Production single-VM backend (GCE) — the "single cloud server" deployment.
+#
+#   The ENTIRE backend (LiveKit SFU + token server + agent) runs on ONE VM.
+#   (It can't go on Cloud Run: the SFU needs UDP 7882 for WebRTC media, and
+#   Cloud Run only serves a single TCP port — no UDP.)
+#
+# Differences from the local dev docker-compose.yml:
+#   * Adds a Caddy reverse proxy → TLS (https/wss) on a real domain, which iOS
+#     App Transport Security requires in production.
+#   * Code is BAKED into the image (no `./:/app` bind mount) and there is no
+#     notes.db mount — all data now lives in Postgres (Supabase) via DB_URL.
+#   * LiveKit advertises the VM's PUBLIC IP (livekit.prod.yaml: use_external_ip).
+#
+# On the VM (Docker + compose installed, backend/.env populated, DNS A record
+# for your domain → the VM's static external IP):
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Required VM firewall ingress: 443/tcp (https/wss), 7881/tcp + 7882/udp
+# (LiveKit media), 22/tcp (admin). 80/tcp is used briefly for ACME HTTP-01.
+services:
+  # TLS-terminating reverse proxy (auto Let's Encrypt). Single public entrypoint.
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"      # HTTP/3 (QUIC)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - livekit
+      - token-server
+
+  # Self-hosted LiveKit SFU. Signaling (:7880) is reached internally by Caddy;
+  # media/TCP-fallback are published to the host so phones on the open internet
+  # can reach them.
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    environment:
+      # Inject keys from .env so no secret lives in the committed config file.
+      - "LIVEKIT_KEYS=${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    ports:
+      - "7881:7881"        # WebRTC over TCP (fallback)
+      - "7882:7882/udp"    # WebRTC media (single multiplexed UDP port)
+    volumes:
+      - ./livekit.prod.yaml:/etc/livekit.yaml:ro
+
+  # FastAPI token server — mints LiveKit tokens; proxied by Caddy at /token.
+  token-server:
+    build: .
+    image: vma-backend:latest
+    restart: unless-stopped
+    command: python token_server.py
+    working_dir: /app
+    env_file: .env
+    expose:
+      - "8080"             # internal only; Caddy fronts it
+    depends_on:
+      - livekit
+
+  # LiveKit Agents worker. Registers over the internal compose network and
+  # reads/writes notes in Postgres (DB_URL in .env).
+  agent:
+    build: .
+    image: vma-backend:latest
+    restart: unless-stopped
+    command: python agent.py start
+    working_dir: /app
+    env_file: .env
+    environment:
+      # Register over the internal compose network (overrides the public wss URL
+      # in .env, which is what the token server hands to the app).
+      - LIVEKIT_URL=ws://livekit:7880
+    depends_on:
+      - livekit
+      - token-server
+
+volumes:
+  caddy_data:
+  caddy_config:

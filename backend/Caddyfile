@@ -1,0 +1,34 @@
+# Caddy reverse proxy for the single-VM backend.
+#
+# Terminates TLS (auto Let's Encrypt) on one domain and fans out by path:
+#   https://api.example.com/token   /health   -> token server  (:8080)
+#   wss://api.example.com           (default)  -> LiveKit signaling (:7880)
+#
+# iOS App Transport Security requires https/wss in production, which is the whole
+# point of this proxy. WebSocket upgrades are handled by reverse_proxy
+# automatically, so the same domain serves both the token REST API and the
+# LiveKit signaling socket.
+#
+# Replace `api.example.com` with your real domain (its A record must point at the
+# VM's static external IP) and set an email for ACME notifications.
+
+{
+	# email you@example.com
+}
+
+api.example.com {
+	encode zstd gzip
+
+	# Token server REST endpoints.
+	handle /token* {
+		reverse_proxy token-server:8080
+	}
+	handle /health* {
+		reverse_proxy token-server:8080
+	}
+
+	# Everything else (incl. the LiveKit /rtc signaling WebSocket) -> LiveKit.
+	handle {
+		reverse_proxy livekit:7880
+	}
+}
