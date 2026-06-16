@@ -1,5 +1,15 @@
-# Self-hosted LiveKit server for Voice Memory Assistant v2.0 (local dev).
-# Brings up the LiveKit SFU locally; only the AI services (Deepgram, Groq) are remote.
+# Single-command backend for Voice Memory Assistant v3.0 (local dev).
+#   docker compose up   ->  LiveKit SFU + token server + agent worker, wired together.
+#
+# Exposed URLs (on the host / LAN):
+#   LiveKit signaling : ws://192.168.1.104:7880   (WebRTC TCP :7881, media :7882/udp)
+#   Token server      : http://192.168.1.104:8080  (POST /token, GET /health)
+#   Agent worker      : (no port) outbound worker that registers with LiveKit
+#
+# All three share backend/.env. The agent registers with LiveKit over the internal
+# compose network (ws://livekit:7880, robust to host-IP changes); the token server
+# hands the app the LAN URL from .env (LIVEKIT_URL) so a physical iPhone can connect.
+# Only the AI services (Deepgram, Groq) are remote.
 services:
   livekit:
     image: livekit/livekit-server:latest
@@ -11,3 +21,36 @@ services:
       - "7882:7882/udp"    # WebRTC media (single multiplexed UDP port)
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
+
+  # FastAPI token server — mints LiveKit access tokens for the app.
+  token-server:
+    build: .
+    image: vma-backend:latest
+    restart: unless-stopped
+    command: python token_server.py
+    working_dir: /app
+    env_file: .env
+    ports:
+      - "8080:8080"        # POST /token, GET /health
+    volumes:
+      - ./:/app            # live source (edit + restart, no rebuild)
+    depends_on:
+      - livekit
+
+  # LiveKit Agents worker — Deepgram STT -> Groq LLM -> Deepgram TTS + Silero VAD.
+  agent:
+    build: .
+    image: vma-backend:latest
+    restart: unless-stopped
+    command: python agent.py start
+    working_dir: /app
+    env_file: .env
+    environment:
+      # Register over the internal compose network (overrides the LAN URL in .env,
+      # which is meant for the app). Robust if the host's LAN IP changes.
+      - LIVEKIT_URL=ws://livekit:7880
+    volumes:
+      - ./:/app            # live source + persists the encrypted notes.db on the host
+    depends_on:
+      - livekit
+      - token-server

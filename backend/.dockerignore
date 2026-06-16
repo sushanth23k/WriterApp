@@ -1,0 +1,21 @@
+# Keep secrets and local artifacts OUT of the built image.
+# (At runtime, docker-compose bind-mounts the source dir, so the live code,
+#  .env, and notes.db are still available to the containers.)
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.db
+*.db-shm
+*.db-wal
+notes.db
+livekit.yaml
+devclient/
+*.bak
+*.bak.*
+.DS_Store
+# macOS AppleDouble files (created on the external APFS volume) break the
+# build context's xattr read — keep them out.
+._*
+**/._*

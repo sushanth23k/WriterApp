@@ -1,9 +1,19 @@
 # WriterApp
 
-Voice Memory Assistant — a hands-free voice assistant.
+Voice Memory Assistant (**v3.0**) — a hands-free voice note-taking app.
 
-- **Backend** (`backend/`): self-hosted LiveKit SFU (Docker) + FastAPI token server + LiveKit Agents worker, with an encrypted SQLite store.
+- **Backend** (`backend/`): self-hosted LiveKit SFU (Docker) + FastAPI token server + LiveKit Agents worker, with an encrypted SQLite (SQLCipher) store.
 - **Frontend** (`app/`): Expo React Native iOS app.
+
+## What's new in v3.0
+
+- **Note docs, not flat notes.** A note is now a *doc* (unique id + title + description) holding an arbitrary-length list of *entries*. Old v2.0 flat notes are auto-migrated into an "Imported Notes" doc on first run (non-destructive). See `backend/store.py`.
+- **Two-state app.**
+  - **MAIN** — a scrollable list of doc cards; a *navigator* voice agent (whose context is the docs **list only** — it can't see entry contents) opens a doc by title/id/description or creates a new one. Tap a card or speak. Start/Stop control mutes the mic without dropping the live list.
+  - **NOTE** — an **isolated** conversation about one doc (its own `note-{id}` LiveKit room; the agent loads only that doc). Add/edit/delete entries and edit the title/description by voice or typing; everything live-syncs.
+- **Single-command backend.** One `docker compose up` brings up all three services (see below).
+
+> LLM: the agents use **Groq** (`llama-3.3-70b-versatile`) — the proven v2.0 pipeline (Deepgram STT/TTS + Silero VAD). Swappable to Anthropic in one place (`backend/agent.py`, `_build_session`).
 
 ## Prerequisites
 
@@ -17,31 +27,50 @@ Voice Memory Assistant — a hands-free voice assistant.
 
 > The LAN IP `192.168.1.104` is hardcoded in `backend/livekit.yaml`, `backend/.env`, and `app/src/config.ts`. If your Mac's IP changes (find it with `ipconfig getifaddr en0`), update all three.
 
-## Start the backend
-
-The backend is three processes. Run each in its own terminal from the `backend/` directory.
+## Start the backend — one command
 
 ```bash
 cd backend
+find . -name '._*' -type f -delete   # see note below
+docker compose up                    # add --build the first time / after code changes
 ```
 
-1. **LiveKit server (Docker):**
-   ```bash
-   docker compose up
-   ```
-   Serves WebSocket signaling on `:7880`, WebRTC TCP on `:7881`, and media on `:7882/udp`.
+This brings up **all three** services, wired over an internal network with a shared `backend/.env`:
 
-2. **Token server (FastAPI, port 8080):**
-   ```bash
-   .venv/bin/python token_server.py
-   ```
+| Service | Exposed URL | Purpose |
+|---|---|---|
+| LiveKit SFU | `ws://192.168.1.104:7880` (TCP `:7881`, media `:7882/udp`) | self-hosted media server |
+| Token server | `http://192.168.1.104:8080` (`POST /token`, `GET /health`) | mints LiveKit tokens; stamps room metadata (`mode`/`doc_id`) |
+| Agent worker | _(no port — outbound worker)_ | NavigatorAgent / NoteAgent / legacy MemoryAssistant |
 
-3. **Agent worker (LiveKit Agents):**
-   ```bash
-   .venv/bin/python agent.py dev
-   ```
+Quick checks:
 
-> Use the venv interpreter (`.venv/bin/python`) — the project deps (fastapi, livekit) live only in `backend/.venv`, so the bare system/pyenv `python` fails with `ModuleNotFoundError`.
+```bash
+curl http://192.168.1.104:8080/health                 # {"status":"ok"}
+docker compose logs agent | grep "registered worker"  # agent connected to LiveKit
+.venv/bin/python test_v3_flow.py                       # headless e2e: docs/entries CRUD + isolation
+```
+
+> **macOS gotcha:** the external APFS volume auto-creates `._*` AppleDouble files that break the Docker build context (`failed to xattr … operation not permitted`). Delete them in the **same** command as the build — `.dockerignore` doesn't help (it's a context-sender failure).
+
+### Combined single image (alternative)
+
+A single container running both token server + agent via supervisord:
+
+```bash
+docker build -t vma-backend backend/
+docker run --rm --env-file backend/.env -p 8080:8080 vma-backend   # still needs the livekit service
+```
+
+### Manual (no Docker) — the original v2.0 way still works
+
+Run each in its own terminal from `backend/`, using the venv interpreter (deps live in `backend/.venv`):
+
+```bash
+docker compose up livekit            # just the SFU
+.venv/bin/python token_server.py
+.venv/bin/python agent.py dev
+```
 
 ## Start the frontend (iOS Simulator)
 
