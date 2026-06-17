@@ -3,6 +3,10 @@
 **/.env
 !**/.env.example
 
+# GCP deploy config (VM identity/IPs) — never commit
+.deployenv
+!.deployenv.example
+
 # Python
 backend/.venv/
 __pycache__/

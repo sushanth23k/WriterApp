@@ -11,17 +11,56 @@ Run:  python test_notes_edit.py
 
 import asyncio
 import json
+import os
 import time
+import urllib.error
 import urllib.request
 
 from livekit import rtc
 
-TOKEN_SERVER = "http://localhost:8080/token"
+BASE = "http://localhost:8080"
+TOKEN_SERVER = f"{BASE}/token"
+
+# Token minting now requires auth — log in once to get a session JWT. Configure via
+# TEST_EMAIL/TEST_PASSWORD (and ADMIN_SECRET to auto-create the test user).
+_TEST_EMAIL = os.getenv("TEST_EMAIL", "test@dropnote.local")
+_TEST_PASSWORD = os.getenv("TEST_PASSWORD", "test-password-123")
+
+
+def _post(path: str, body: dict, headers: dict | None = None) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        f"{BASE}{path}", data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", **(headers or {})}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, {"detail": e.read().decode(errors="ignore")}
+
+
+def _bootstrap_jwt() -> str:
+    admin = os.getenv("ADMIN_SECRET")
+    if admin:
+        _post("/users", {"email": _TEST_EMAIL, "password": _TEST_PASSWORD},
+              {"X-Admin-Token": admin})
+    status, data = _post("/login", {"email": _TEST_EMAIL, "password": _TEST_PASSWORD})
+    if status != 200:
+        raise SystemExit(
+            f"login failed ({status}): {data}. Set TEST_EMAIL/TEST_PASSWORD (and "
+            "ADMIN_SECRET to auto-create the user)."
+        )
+    return data["access_token"]
+
+
+_JWT = _bootstrap_jwt()
 
 
 def get_token() -> tuple[str, str, str]:
     req = urllib.request.Request(
-        TOKEN_SERVER, data=b"{}", headers={"Content-Type": "application/json"}, method="POST"
+        TOKEN_SERVER, data=b"{}",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {_JWT}"}, method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as r:
         d = json.loads(r.read())

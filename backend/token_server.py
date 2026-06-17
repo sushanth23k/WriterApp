@@ -1,4 +1,10 @@
-"""Token server for Voice Memory Assistant.
+"""Token server for DropNote.
+
+Auth (DropNote): minting a LiveKit token now requires a valid session. The app signs
+in at ``POST /login`` (email + password, checked against the Postgres ``user_schema``
+store) to get a JWT, then sends it as ``Authorization: Bearer`` on ``POST /token``.
+Accounts are created out-of-band via ``POST /users`` (no UI), guarded by an admin
+secret header — for personal use only. See ``auth.py`` and ``user_store.py``.
 
 v2.0: mints a short-lived LiveKit access token for a brand-new random room on
 every request (empty body) — preserved unchanged for backward compatibility.
@@ -19,10 +25,13 @@ import os
 import uuid
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from livekit import api
 from pydantic import BaseModel
+
+from auth import create_access_token, require_admin, require_user
+from user_store import UserStore
 
 load_dotenv()
 
@@ -32,7 +41,7 @@ LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
 LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 
-app = FastAPI(title="Voice Memory Assistant Token Server")
+app = FastAPI(title="DropNote Token Server")
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,6 +50,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Lazily-opened Postgres user store (auth lives in the `user_schema` schema). Opened
+# on first use so the token server still imports/health-checks without a DB present.
+_user_store: UserStore | None = None
+
+
+def get_user_store() -> UserStore:
+    global _user_store
+    if _user_store is None:
+        _user_store = UserStore.from_env()
+    return _user_store
 
 
 class TokenRequest(BaseModel):
@@ -61,13 +81,55 @@ class TokenResponse(BaseModel):
     doc_id: str | None = None
 
 
+class Credentials(BaseModel):
+    email: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    email: str
+
+
+class CreatedUser(BaseModel):
+    email: str
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/login", response_model=LoginResponse)
+async def login(creds: Credentials) -> LoginResponse:
+    """Exchange email + password for a session JWT."""
+    store = get_user_store()
+    email = creds.email.strip().lower()
+    if not store.verify_user(email, creds.password):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    return LoginResponse(access_token=create_access_token(email), email=email)
+
+
+@app.post("/users", response_model=CreatedUser, status_code=201)
+async def create_user(
+    creds: Credentials, _: None = Depends(require_admin)
+) -> CreatedUser:
+    """Create a user account (no UI — personal use, guarded by X-Admin-Token)."""
+    store = get_user_store()
+    try:
+        account = store.create_user(creds.email, creds.password)
+    except ValueError as e:
+        # Duplicate email or invalid input.
+        status_code = 409 if "already exists" in str(e) else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    return CreatedUser(email=account.email)
+
+
 @app.post("/token", response_model=TokenResponse)
-async def create_token(req: TokenRequest | None = None) -> TokenResponse:
+async def create_token(
+    req: TokenRequest | None = None, user: str = Depends(require_user)
+) -> TokenResponse:
     if not (LIVEKIT_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET):
         raise HTTPException(
             status_code=500,
@@ -93,7 +155,8 @@ async def create_token(req: TokenRequest | None = None) -> TokenResponse:
         # Legacy v2.0: fresh random room, no metadata, MemoryAssistant path.
         room = f"voice-memory-{uuid.uuid4().hex[:12]}"
 
-    identity = (req.identity if req and req.identity else None) or f"user-{uuid.uuid4().hex[:8]}"
+    # Identity is derived from the authenticated user (unique per LiveKit room join).
+    identity = f"{user}-{uuid.uuid4().hex[:6]}"
 
     grants = api.VideoGrants(
         room_join=True,

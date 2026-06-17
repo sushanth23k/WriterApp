@@ -50,6 +50,11 @@ NAVIGATE_TOPIC = "navigate"    # agent -> app: transition into NOTE state for a 
 DOC_TOPIC = "doc"              # agent -> app: the single current doc (with entries)
 DOC_EDIT_TOPIC = "doc-edit"    # app -> agent: typed entry/meta CRUD for THIS doc
 
+# --- voice state-movement control (agent -> app) ---
+# Lets the user move between states by voice: "go back" (NOTE -> MAIN) and
+# "stop it" (end the conversation / disconnect). Carries {"action": ...}.
+CONTROL_TOPIC = "control"
+
 
 @dataclass
 class SessionMemory:
@@ -66,8 +71,22 @@ class SessionMemory:
     doc_id: str | None = None
 
 
+# Shared guardrail appended to EVERY agent's instructions. The model's text is read
+# aloud by TTS, so it must never verbalize any tool/function-call machinery — that's
+# what causes spoken gibberish like "function add_entry(...)".
+SPEAK_NATURALLY = (
+    "CRITICAL — you are spoken aloud by a text-to-speech voice. Speak ONLY plain, "
+    "natural, human language. NEVER say the word 'function'. Never speak, spell, or "
+    "describe any tool or function name, parameter, argument, JSON, bracket, or code, "
+    "and never read out internal ids. To do something, silently call the tool — do not "
+    "announce, narrate, or echo the call — and THEN say one short, natural sentence "
+    "about the result (e.g. 'Added that.'). Tool calls and your spoken words must never "
+    "be mixed together or overlap."
+)
+
+
 INSTRUCTIONS = (
-    "You are Voice Memory Assistant, a calm, concise, friendly voice companion. "
+    "You are DropNote, a calm, concise, friendly voice companion. "
     "You speak out loud, so keep replies short and natural — one or two sentences, "
     "no markdown, no bullet points, no emoji. "
     "You remember notes the user tells you, and your memory PERSISTS across "
@@ -80,7 +99,8 @@ INSTRUCTIONS = (
     "delete_note. Use list_notes when you need each note's id before updating or deleting "
     "— ids are internal bookkeeping, so NEVER read an id out loud. "
     "If asked about persistence, explain that you keep these notes saved and will "
-    "remember them next time too."
+    "remember them next time too. "
+    + SPEAK_NATURALLY
 )
 
 
@@ -246,7 +266,10 @@ NAVIGATOR_INSTRUCTIONS = (
     "(e.g. 'a new note about the trip' -> title 'Trip'; 'start a grocery list' -> "
     "'Groceries') — never a generic title like 'New Note' — plus a one-line description. "
     "If several notes could match, ask a brief clarifying question naming the "
-    "candidates. Never read ids out loud — they are internal."
+    "candidates. Never read ids out loud — they are internal. "
+    "If the user wants to end the conversation (e.g. 'stop it', 'we're done', "
+    "'end'), call stop_conversation. "
+    + SPEAK_NATURALLY
 )
 
 
@@ -310,6 +333,17 @@ class NavigatorAgent(Agent):
         await send_navigate(context.userdata, doc)
         return f"Created '{doc.title}'. Opening it now."
 
+    @function_tool
+    async def stop_conversation(self, context: RunContext[SessionMemory]) -> str:
+        """Stop listening — pause the microphone, staying on this page.
+
+        Call this when the user says things like "stop it", "stop listening",
+        "we're done", or "end". The page stays open; they can tap Start to resume.
+        """
+        await send_control(context.userdata, "stop")
+        logger.info("stop_conversation[main]")
+        return "Okay, I'll stop listening. Tap start when you want to talk again."
+
 
 # =====================================================================
 # v3.0 NOTE state — NoteAgent (context = ONE doc only; hard isolation)
@@ -323,13 +357,21 @@ NOTE_INSTRUCTIONS = (
     "calling add_entry; change a line with update_entry and remove one with "
     "delete_entry; use list_entries when you need an entry's id first (never read ids "
     "aloud). "
-    "Do NOT call update_doc_meta during ordinary note-taking. The title and "
-    "description were set by the user and should almost never change — adding or "
-    "editing entries is NOT a reason to touch them. Only call update_doc_meta if the "
-    "user EXPLICITLY asks to rename the note or change its description. When in doubt, "
-    "leave the title and description exactly as they are. "
+    "Keep the note's title and description ACCURATE as its content grows. Whenever you "
+    "add or change entries in a way that DRASTICALLY shifts or clarifies what this note "
+    "is about, call update_doc_meta to refresh the title and/or description so they "
+    "still summarize the note's current contents — a short, specific title and a "
+    "one-line description. Do not churn them for small additions that don't change the "
+    "gist, and honor a title or description the user set explicitly unless the content "
+    "clearly outgrows it. Do this quietly: update the meta, then just keep helping — "
+    "don't read the new title or description aloud unless asked. "
     "You only know about THIS note — you have no access to the user's other notes, so "
-    "never refer to them."
+    "never refer to them. "
+    "If the user wants to leave this note and return to their list (e.g. 'go back', "
+    "'take me back', 'back to my notes'), call go_back. If they want to end the "
+    "conversation entirely (e.g. 'stop it', 'we're done', 'end'), call "
+    "stop_conversation. "
+    + SPEAK_NATURALLY
 )
 
 
@@ -420,8 +462,9 @@ class NoteAgent(Agent):
         self, context: RunContext[SessionMemory],
         title: str = "", description: str = "",
     ) -> str:
-        """Rename this note and/or change its description. Use SPARINGLY. Pass an
-        EMPTY STRING for a field you want to leave unchanged.
+        """Refresh this note's title and/or description so they stay accurate as its
+        content grows. Call this when added/changed entries drastically shift or clarify
+        what the note is about. Pass an EMPTY STRING for a field to leave it unchanged.
 
         (Both args are plain strings with an "" default on purpose — optional/null
         params trip Groq's strict tool-call validation.)
@@ -445,6 +488,28 @@ class NoteAgent(Agent):
         logger.info("update_doc_meta[%s]: title=%r desc=%r", ud.doc_id, new_title, new_desc)
         await broadcast_doc(ud)
         return "Updated this note's details."
+
+    @function_tool
+    async def go_back(self, context: RunContext[SessionMemory]) -> str:
+        """Leave this note and return to the main notes list.
+
+        Call this when the user says things like "go back", "take me back", or
+        "back to my notes".
+        """
+        await send_control(context.userdata, "go_back")
+        logger.info("go_back[%s]", context.userdata.doc_id)
+        return "Taking you back to your notes."
+
+    @function_tool
+    async def stop_conversation(self, context: RunContext[SessionMemory]) -> str:
+        """Stop listening — pause the microphone, staying on this page.
+
+        Call this when the user says things like "stop it", "stop listening",
+        "we're done", or "end". The page stays open; they can tap Start to resume.
+        """
+        await send_control(context.userdata, "stop")
+        logger.info("stop_conversation[%s]", context.userdata.doc_id)
+        return "Okay, I'll stop listening. Tap start when you want to talk again."
 
 
 # ---- v3.0 live-sync helpers ---------------------------------------------------
@@ -479,6 +544,20 @@ async def broadcast_doc(ud: SessionMemory) -> None:
         logger.info("broadcast_doc[%s]: published %d byte(s)", ud.doc_id, len(payload))
     except Exception:
         logger.exception("broadcast_doc failed")
+
+
+async def send_control(ud: SessionMemory, action: str) -> None:
+    """Tell the app to move app state by voice: 'go_back' or 'stop'."""
+    if ud.room is None:
+        return
+    payload = json.dumps({"type": "control", "action": action})
+    try:
+        await ud.room.local_participant.publish_data(
+            payload, reliable=True, topic=CONTROL_TOPIC
+        )
+        logger.info("send_control -> %s", action)
+    except Exception:
+        logger.exception("send_control failed")
 
 
 async def send_navigate(ud: SessionMemory, doc) -> None:

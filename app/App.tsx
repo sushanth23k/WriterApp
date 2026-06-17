@@ -22,6 +22,8 @@ import {
 import { AudioSession, LiveKitRoom } from '@livekit/react-native';
 
 import { fetchToken } from './src/api';
+import { UnauthorizedError, useAuth } from './src/auth';
+import { LoginScreen } from './src/LoginScreen';
 import { MainScreen } from './src/MainScreen';
 import { NoteScreen } from './src/NoteScreen';
 import { colors, radius, space, type } from './src/theme';
@@ -30,6 +32,29 @@ import type { Screen } from './src/types';
 type Conn = { url: string; token: string };
 
 export default function App() {
+  const { token, loading, signIn, signOut } = useAuth();
+
+  // Until auth resolves, show nothing/spinner; gate the whole app on a session.
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.center]}>
+        <ActivityIndicator size="large" color={colors.accent} />
+      </View>
+    );
+  }
+  if (!token) {
+    return <LoginScreen onSignIn={signIn} />;
+  }
+  return <AuthedApp token={token} onSignOut={signOut} />;
+}
+
+function AuthedApp({
+  token,
+  onSignOut,
+}: {
+  token: string;
+  onSignOut: () => void;
+}) {
   const [screen, setScreen] = useState<Screen>({ mode: 'main' });
   const [conn, setConn] = useState<Conn | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +72,8 @@ export default function App() {
     };
   }, []);
 
-  // (Re)connect whenever the screen (or a manual retry) changes.
+  // (Re)connect whenever the screen (or a manual retry) changes. A 401 here means
+  // the session expired -> sign out.
   useEffect(() => {
     let cancelled = false;
     setConn(null);
@@ -56,17 +82,22 @@ export default function App() {
       try {
         const data =
           screen.mode === 'note'
-            ? await fetchToken('note', screen.docId)
-            : await fetchToken('main');
+            ? await fetchToken('note', token, screen.docId)
+            : await fetchToken('main', token);
         if (!cancelled) setConn({ url: data.url, token: data.token });
       } catch (e: any) {
-        if (!cancelled) setError(e?.message ?? String(e));
+        if (cancelled) return;
+        if (e instanceof UnauthorizedError) {
+          onSignOut();
+          return;
+        }
+        setError(e?.message ?? String(e));
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [screen, retry]);
+  }, [screen, retry, token, onSignOut]);
 
   const goNote = useCallback(
     (docId: string, title: string) => setScreen({ mode: 'note', docId, title }),
@@ -112,7 +143,7 @@ export default function App() {
           onError={(e) => setError(e?.message ?? String(e))}
         >
           {screen.mode === 'main' ? (
-            <MainScreen onNavigate={goNote} />
+            <MainScreen onNavigate={goNote} onSignOut={onSignOut} />
           ) : (
             <NoteScreen
               docId={screen.docId}
@@ -135,7 +166,7 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
   },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: space.lg },
-  connecting: { ...type.body, color: colors.textDim },
+  connecting: { ...type.body, color: colors.textDim, textAlign: 'center' },
   errorTitle: { ...type.title, color: colors.text },
   errorMsg: {
     ...type.body,

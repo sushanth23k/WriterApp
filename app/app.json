@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Voice Memory Assistant",
+    "name": "DropNote",
     "slug": "app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,10 +8,13 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.sushanthpanasa.voicememory",
+      "bundleIdentifier": "com.voicememory.app",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Voice Memory Assistant needs the microphone so you can talk to the assistant.",
-        "UIBackgroundModes": ["audio", "voip"]
+        "NSMicrophoneUsageDescription": "DropNote needs the microphone so you can talk to your notes assistant.",
+        "UIBackgroundModes": [
+          "audio",
+          "voip"
+        ]
       }
     },
     "android": {
@@ -28,7 +31,9 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "@config-plugins/react-native-webrtc"
+      "@config-plugins/react-native-webrtc",
+      "expo-secure-store",
+      "./plugins/withAtsArbitraryLoads"
     ]
   }
 }

@@ -1,0 +1,45 @@
+# Self-contained compose run ON THE VM. It is shipped to the VM as instance metadata by
+# deploy/deploy.sh — the VM never clones the repo from GitHub.
+#
+# Key point: token-server + agent use the PREBUILT image (${DROPNOTE_IMAGE}, built locally
+# and pushed to Artifact Registry) — there is NO `build:` here, so the VM never builds.
+# LiveKit comes from Docker Hub. The agent reaches LiveKit over the internal compose
+# network; the token server advertises the public LIVEKIT_URL (from .env).
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: always
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"        # WebSocket signaling
+      - "7881:7881"        # WebRTC over TCP (fallback)
+      - "7882:7882/udp"    # WebRTC media (single multiplexed UDP port)
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+
+  token-server:
+    image: ${DROPNOTE_IMAGE:?set DROPNOTE_IMAGE}
+    restart: always
+    command: python token_server.py
+    env_file: .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      - livekit
+
+  agent:
+    image: ${DROPNOTE_IMAGE:?set DROPNOTE_IMAGE}
+    restart: always
+    command: python agent.py start
+    env_file: .env
+    environment:
+      # Agent talks to LiveKit over the internal compose network (not the public IP).
+      - LIVEKIT_URL=ws://livekit:7880
+    volumes:
+      - dropnote-data:/app/data    # persist the encrypted notes.db across restarts
+    depends_on:
+      - livekit
+      - token-server
+
+volumes:
+  dropnote-data:

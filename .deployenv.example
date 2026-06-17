@@ -1,0 +1,36 @@
+# =============================================================================
+# DropNote — GCP deploy config (copy to .deployenv and fill in; .deployenv is
+# gitignored). Holds the IDENTITY/LOCATION of your GCP VM, project, and Artifact
+# Registry so the gcloud-driven deploy (deploy/deploy.sh) knows what to target.
+# The app SECRETS stay in backend/.env — they are shipped to the VM at deploy time
+# as instance metadata. The code is NOT pulled from GitHub: it is baked into a Docker
+# image built on your laptop and pushed to Artifact Registry.
+# =============================================================================
+
+# --- GCP project / location (from the Cloud Console) ---
+GCP_PROJECT=your-project-id           # Console → top project picker → "ID"
+GCP_REGION=us-central1                # a free-tier region (us-west1/us-central1/us-east1)
+GCP_ZONE=us-central1-a                # any zone in that region
+
+# --- The VM (create it in the Console first; see DEPLOY.md Part A) ---
+VM_NAME=dropnote                      # the instance name
+VM_NETWORK_TAG=dropnote               # network tag the firewall rule targets
+
+# --- Filled in AFTER the VM exists (Console shows both; or `gcloud compute
+#     instances describe VM_NAME --zone ZONE`) ---
+VM_EXTERNAL_IP=                       # public IP the phone/app connects to
+VM_INTERNAL_IP=                       # private/internal IP (10.x) — for VPC-internal use
+
+# --- Artifact Registry (deploy.sh creates the repo if missing) ---
+AR_REPO=dropnote                      # Docker repo name under GCP_REGION
+
+# --- What we expect FROM GCP for all this to work ---
+#  • A project with billing enabled; deploy.sh enables the Artifact Registry API.
+#  • A VM (created in Part A) with the VM_NETWORK_TAG above and an external IP, whose
+#    attached service account can read Artifact Registry (deploy.sh grants this).
+#  • A firewall rule allowing TCP 7880,7881,8080 + UDP 7882 to that tag.
+#  • Local tooling: Docker Desktop (with buildx) + `gcloud` authenticated:
+#      gcloud auth login
+#      gcloud config set project GCP_PROJECT
+#  • Your account with roles/artifactregistry.admin (push + create repo) and
+#    roles/compute.instanceAdmin.v1 (set metadata + reset the VM).

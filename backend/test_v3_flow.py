@@ -11,18 +11,58 @@ Run (stack up):  .venv/bin/python test_v3_flow.py
 
 import asyncio
 import json
+import os
 import time
+import urllib.error
 import urllib.request
 
 from livekit import rtc
 
-TOKEN_SERVER = "http://localhost:8080/token"
+BASE = "http://localhost:8080"
+TOKEN_SERVER = f"{BASE}/token"
+
+# Token minting now requires auth. Bootstrap a session JWT once: ensure a test user
+# exists (admin endpoint), then log in. Configure via env:
+#   TEST_EMAIL, TEST_PASSWORD, ADMIN_SECRET (ADMIN_SECRET only needed to auto-create).
+_TEST_EMAIL = os.getenv("TEST_EMAIL", "test@dropnote.local")
+_TEST_PASSWORD = os.getenv("TEST_PASSWORD", "test-password-123")
+
+
+def _post(path: str, body: dict, headers: dict | None = None) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        f"{BASE}{path}", data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", **(headers or {})}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, {"detail": e.read().decode(errors="ignore")}
+
+
+def _bootstrap_jwt() -> str:
+    admin = os.getenv("ADMIN_SECRET")
+    if admin:
+        # Idempotent: 201 creates, 409 means it already exists — both are fine.
+        _post("/users", {"email": _TEST_EMAIL, "password": _TEST_PASSWORD},
+              {"X-Admin-Token": admin})
+    status, data = _post("/login", {"email": _TEST_EMAIL, "password": _TEST_PASSWORD})
+    if status != 200:
+        raise SystemExit(
+            f"login failed ({status}): {data}. Set TEST_EMAIL/TEST_PASSWORD (and "
+            "ADMIN_SECRET to auto-create the user)."
+        )
+    return data["access_token"]
+
+
+_JWT = _bootstrap_jwt()
 
 
 def tok(body: dict) -> dict:
     req = urllib.request.Request(
         TOKEN_SERVER, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {_JWT}"}, method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())

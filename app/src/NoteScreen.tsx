@@ -16,7 +16,7 @@ import { useRoomContext } from '@livekit/react-native';
 import { colors, radius, space, type } from './theme';
 import { TOPICS, type Entry, type FullDoc } from './types';
 import { useConnState, useDataTopic, useMic, usePublish, useTranscript } from './livekit';
-import { MicButton, SectionLabel, StatusPill, TranscriptView } from './ui';
+import { CommandsHint, MicButton, SectionLabel, StatusPill, TranscriptView } from './ui';
 
 export function NoteScreen({
   docId,
@@ -40,7 +40,7 @@ export function NoteScreen({
 
   const connState = useConnState(room);
   const connected = connState === 'connected';
-  const [micOn, toggleMic] = useMic(room);
+  const [micOn, toggleMic, setMic] = useMic(room);
   const transcript = useTranscript(room);
   const publish = usePublish(room);
 
@@ -51,6 +51,14 @@ export function NoteScreen({
     setDoc(d);
     if (!editingTitle.current) setTitle(d.title);
     if (!editingDesc.current) setDesc(d.description);
+  });
+
+  // Voice state-movement control: "go back" -> MAIN; "stop" -> stop listening
+  // (mute the mic in place, same as the on-screen Stop button — room stays up).
+  useDataTopic(room, TOPICS.control, (msg) => {
+    if (msg?.type !== 'control') return;
+    if (msg.action === 'go_back') onBack();
+    else if (msg.action === 'stop') setMic(false);
   });
 
   const saveMeta = useCallback(
@@ -85,7 +93,10 @@ export function NoteScreen({
         <Pressable hitSlop={10} onPress={onBack} style={styles.back}>
           <Text style={styles.backText}>‹  Notes</Text>
         </Pressable>
-        <StatusPill connected={connected} micOn={micOn} />
+        <View style={styles.topRight}>
+          <StatusPill connected={connected} micOn={micOn} />
+          <CommandsHint showGoBack />
+        </View>
       </View>
 
       <TextInput
@@ -196,6 +207,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: space.md,
   },
+  topRight: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   back: { paddingVertical: 4, paddingRight: space.md },
   backText: { ...type.bodyStrong, color: colors.accent },
   titleInput: {

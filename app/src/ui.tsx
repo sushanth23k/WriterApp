@@ -1,10 +1,49 @@
 // Shared presentational components for a consistent, modern look across screens.
 
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useEffect, useRef } from 'react';
+import { FlatList, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
 
 import { colors, radius, space, type } from './theme';
 import type { TranscriptItem } from './types';
+
+// A small corner badge that reveals the available voice commands in a popup.
+// "Stop it" is always available; "Go back" only inside a note (showGoBack).
+export function CommandsHint({ showGoBack }: { showGoBack: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Pressable
+        hitSlop={8}
+        onPress={() => setOpen(true)}
+        style={({ pressed }) => [styles.hintBadge, pressed && { opacity: 0.7 }]}
+      >
+        <Text style={styles.hintBadgeText}>ⓘ</Text>
+      </Pressable>
+      <Modal
+        transparent
+        visible={open}
+        animationType="fade"
+        onRequestClose={() => setOpen(false)}
+      >
+        <Pressable style={styles.hintBackdrop} onPress={() => setOpen(false)}>
+          <Pressable style={styles.hintCard} onPress={() => {}}>
+            <Text style={styles.hintTitle}>Voice commands</Text>
+            {showGoBack ? (
+              <View style={styles.hintRow}>
+                <Text style={styles.hintCmd}>“Go back”</Text>
+                <Text style={styles.hintDesc}>return to your notes</Text>
+              </View>
+            ) : null}
+            <View style={styles.hintRow}>
+              <Text style={styles.hintCmd}>“Stop it”</Text>
+              <Text style={styles.hintDesc}>stop listening (tap Start to resume)</Text>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
+  );
+}
 
 // Connection / listening status chip.
 export function StatusPill({
@@ -126,4 +165,33 @@ const styles = StyleSheet.create({
     color: colors.textFaint,
     marginBottom: space.sm,
   },
+  hintBadge: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  hintBadgeText: { color: colors.textDim, fontSize: 14, fontWeight: '700' },
+  hintBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    paddingHorizontal: space.xl,
+  },
+  hintCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: space.xl,
+    gap: space.md,
+  },
+  hintTitle: { ...type.title, color: colors.text, marginBottom: space.xs },
+  hintRow: { flexDirection: 'row', alignItems: 'baseline', gap: space.sm },
+  hintCmd: { ...type.bodyStrong, color: colors.accentText },
+  hintDesc: { ...type.small, color: colors.textDim },
 });

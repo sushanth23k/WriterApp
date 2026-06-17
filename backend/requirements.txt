@@ -8,9 +8,10 @@ fastapi
 uvicorn[standard]
 python-dotenv
 
-# Notes store — two backends:
-#   * SQLCipher / AES-256 SQLite (local/offline dev + migration source)
-#   * PostgreSQL (Supabase) via psycopg3; [binary] bundles libpq (no extra apt),
-#     [pool] adds the thread-safe psycopg_pool.ConnectionPool.
+# v2.0 encrypted notes store (SQLCipher / AES-256 at rest)
 sqlcipher3
-psycopg[binary,pool]
+
+# Authentication: Postgres-backed user store (user_schema) + bcrypt + JWT
+psycopg[binary]
+bcrypt
+pyjwt

@@ -50,9 +50,7 @@ services:
       # which is meant for the app). Robust if the host's LAN IP changes.
       - LIVEKIT_URL=ws://livekit:7880
     volumes:
-      # Live source. Notes persist in Postgres when DB_URL is set in .env;
-      # otherwise the encrypted notes.db is persisted here on the host.
-      - ./:/app
+      - ./:/app            # live source + persists the encrypted notes.db on the host
     depends_on:
       - livekit
       - token-server

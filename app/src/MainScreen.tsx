@@ -17,12 +17,14 @@ import { useRoomContext } from '@livekit/react-native';
 import { colors, radius, space, type } from './theme';
 import { TOPICS, type Doc } from './types';
 import { useConnState, useDataTopic, useMic, usePublish, useTranscript } from './livekit';
-import { MicButton, SectionLabel, StatusPill, TranscriptView } from './ui';
+import { CommandsHint, MicButton, SectionLabel, StatusPill, TranscriptView } from './ui';
 
 export function MainScreen({
   onNavigate,
+  onSignOut,
 }: {
   onNavigate: (docId: string, title: string) => void;
+  onSignOut: () => void;
 }) {
   const room = useRoomContext();
   const [docs, setDocs] = useState<Doc[]>([]);
@@ -33,7 +35,7 @@ export function MainScreen({
 
   const connState = useConnState(room);
   const connected = connState === 'connected';
-  const [micOn, toggleMic] = useMic(room);
+  const [micOn, toggleMic, setMic] = useMic(room);
   const transcript = useTranscript(room);
   const publish = usePublish(room);
 
@@ -56,6 +58,12 @@ export function MainScreen({
     if (msg?.type === 'navigate' && msg.doc_id) {
       onNavigate(msg.doc_id, msg.title ?? '');
     }
+  });
+
+  // Voice state-movement control. In MAIN only "stop" applies: stop listening by
+  // muting the mic in place (same as the on-screen Stop button).
+  useDataTopic(room, TOPICS.control, (msg) => {
+    if (msg?.type === 'control' && msg.action === 'stop') setMic(false);
   });
 
   const submitCreate = useCallback(() => {
@@ -81,10 +89,18 @@ export function MainScreen({
     <View style={styles.flex}>
       <View style={styles.header}>
         <View>
-          <Text style={styles.kicker}>VOICE MEMORY</Text>
+          <Text style={styles.kicker}>DROPNOTE</Text>
           <Text style={styles.h1}>Your notes</Text>
         </View>
-        <StatusPill connected={connected} micOn={micOn} />
+        <View style={styles.headerRight}>
+          <View style={styles.headerRightTop}>
+            <StatusPill connected={connected} micOn={micOn} />
+            <CommandsHint showGoBack={false} />
+          </View>
+          <Pressable hitSlop={8} onPress={onSignOut} style={styles.logoutBtn}>
+            <Text style={styles.logoutText}>Log out</Text>
+          </Pressable>
+        </View>
       </View>
 
       <View style={styles.controls}>
@@ -202,6 +218,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: space.lg,
   },
+  headerRight: { alignItems: 'flex-end', gap: space.sm },
+  headerRightTop: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  logoutBtn: { paddingVertical: 2, paddingHorizontal: 4 },
+  logoutText: { ...type.label, color: colors.textDim },
   kicker: { ...type.label, color: colors.accent, marginBottom: 2 },
   h1: { ...type.display, color: colors.text },
   controls: {

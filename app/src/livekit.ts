@@ -147,8 +147,10 @@ export function useConnState(room: Room): string {
 }
 
 // Mic on/off control = the "start/stop conversation" mechanism. The room stays
-// connected (live views + typed CRUD keep working); only the mic is toggled.
-export function useMic(room: Room): [boolean, () => void] {
+// connected (live views + typed CRUD keep working); only the mic is toggled. The
+// returned `setMic` lets the voice "stop it" command force the mic off in place,
+// exactly like tapping the on-screen Stop button.
+export function useMic(room: Room): [boolean, () => void, (on: boolean) => void] {
   const [micOn, setMicOn] = useState(true);
   useEffect(() => {
     room.localParticipant.setMicrophoneEnabled(micOn).catch((e) => {
@@ -156,5 +158,6 @@ export function useMic(room: Room): [boolean, () => void] {
     });
   }, [room, micOn]);
   const toggle = useCallback(() => setMicOn((v) => !v), []);
-  return [micOn, toggle];
+  const setMic = useCallback((on: boolean) => setMicOn(on), []);
+  return [micOn, toggle, setMic];
 }

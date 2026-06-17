@@ -42,4 +42,6 @@ export const TOPICS = {
   // NOTE
   doc: 'doc', // agent -> app: the single current doc (+entries)
   docEdit: 'doc-edit', // app -> agent: typed entry/meta CRUD
+  // voice state-movement control (agent -> app): "go_back" / "stop"
+  control: 'control',
 } as const;
