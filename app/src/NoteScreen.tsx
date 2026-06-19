@@ -1,8 +1,10 @@
 // NOTE state — an isolated conversation about ONE doc. The user just talks and the
 // assistant notes things down; the room is scoped to this doc only (enforced by the
-// backend). Title/description/entries are all editable by typing too, live-synced.
+// backend). Title/description/entries are loaded and edited DIRECTLY over the REST API
+// (scoped to the signed-in user); the data channel only carries live updates while the
+// voice agent is mid-call.
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
   Pressable,
@@ -13,19 +15,31 @@ import {
 } from 'react-native';
 import { useRoomContext } from '@livekit/react-native';
 
+import {
+  addEntry as apiAddEntry,
+  deleteEntry as apiDeleteEntry,
+  getDoc,
+  updateDoc,
+  updateEntry,
+} from './api';
+import { UnauthorizedError } from './auth';
 import { colors, radius, space, type } from './theme';
 import { TOPICS, type Entry, type FullDoc } from './types';
-import { useConnState, useDataTopic, useMic, usePublish, useTranscript } from './livekit';
+import { useConnState, useDataTopic, useMic, useTranscript } from './livekit';
 import { CommandsHint, MicButton, SectionLabel, StatusPill, TranscriptView } from './ui';
 
 export function NoteScreen({
+  token,
   docId,
   initialTitle,
   onBack,
+  onSignOut,
 }: {
+  token: string;
   docId: string;
   initialTitle: string;
   onBack: () => void;
+  onSignOut: () => void;
 }) {
   const room = useRoomContext();
   const [doc, setDoc] = useState<FullDoc | null>(null);
@@ -42,15 +56,44 @@ export function NoteScreen({
   const connected = connState === 'connected';
   const [micOn, toggleMic, setMic] = useMic(room);
   const transcript = useTranscript(room);
-  const publish = usePublish(room);
 
-  // The single doc (with entries) broadcast from the note agent.
-  useDataTopic(room, TOPICS.doc, (msg) => {
-    if (msg?.type !== 'doc' || !msg.doc) return;
-    const d: FullDoc = { ...msg.doc, entries: msg.doc.entries ?? [] };
+  // Apply a fetched doc to local state, respecting any in-progress field edits.
+  const applyDoc = useCallback((d: FullDoc) => {
     setDoc(d);
     if (!editingTitle.current) setTitle(d.title);
     if (!editingDesc.current) setDesc(d.description);
+  }, []);
+
+  // Run a REST mutation, then refetch the doc so local state matches the DB. An
+  // expired session signs the user out.
+  const withReload = useCallback(
+    async (op: () => Promise<unknown>) => {
+      try {
+        await op();
+        applyDoc(await getDoc(token, docId));
+      } catch (e) {
+        if (e instanceof UnauthorizedError) onSignOut();
+      }
+    },
+    [token, docId, applyDoc, onSignOut],
+  );
+
+  // Initial load: fetch this doc (with entries) directly over REST.
+  useEffect(() => {
+    (async () => {
+      try {
+        applyDoc(await getDoc(token, docId));
+      } catch (e) {
+        if (e instanceof UnauthorizedError) onSignOut();
+      }
+    })();
+  }, [token, docId, applyDoc, onSignOut]);
+
+  // Live updates while a voice call is active: the note agent broadcasts this doc
+  // (with entries) after a voice-driven change.
+  useDataTopic(room, TOPICS.doc, (msg) => {
+    if (msg?.type !== 'doc' || !msg.doc) return;
+    applyDoc({ ...msg.doc, entries: msg.doc.entries ?? [] });
   });
 
   // Voice state-movement control: "go back" -> MAIN; "stop" -> stop listening
@@ -63,26 +106,28 @@ export function NoteScreen({
 
   const saveMeta = useCallback(
     (patch: { title?: string; description?: string }) =>
-      publish(TOPICS.docEdit, { action: 'update_meta', ...patch }),
-    [publish],
+      withReload(() => updateDoc(token, docId, patch)),
+    [withReload, token, docId],
   );
 
   const addEntry = useCallback(() => {
     const t = draft.trim();
     if (!t) return;
-    publish(TOPICS.docEdit, { action: 'add_entry', text: t });
     setDraft('');
-  }, [draft, publish]);
+    withReload(() => apiAddEntry(token, docId, t));
+  }, [draft, withReload, token, docId]);
 
   const saveEntry = useCallback(() => {
-    if (editId) publish(TOPICS.docEdit, { action: 'update_entry', id: editId, text: editText.trim() });
+    const id = editId;
+    const text = editText.trim();
     setEditId(null);
     setEditText('');
-  }, [editId, editText, publish]);
+    if (id) withReload(() => updateEntry(token, docId, id, text));
+  }, [editId, editText, withReload, token, docId]);
 
   const deleteEntry = useCallback(
-    (id: string) => publish(TOPICS.docEdit, { action: 'delete_entry', id }),
-    [publish],
+    (id: string) => withReload(() => apiDeleteEntry(token, docId, id)),
+    [withReload, token, docId],
   );
 
   const entries: Entry[] = doc?.entries ?? [];
@@ -140,9 +185,7 @@ export function NoteScreen({
         contentContainerStyle={entries.length === 0 && styles.emptyWrap}
         ListEmptyComponent={
           <Text style={styles.empty}>
-            {connected
-              ? 'Start talking and I’ll note things down here — or type below.'
-              : 'Connecting…'}
+            Start talking and I’ll note things down here — or type below.
           </Text>
         }
         renderItem={({ item }) =>

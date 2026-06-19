@@ -11,12 +11,13 @@ All secrets come from the environment — nothing is hardcoded.
 
 from __future__ import annotations
 
-import os
 import time
 
 import bcrypt
 import jwt
 from fastapi import Header, HTTPException, status
+
+import env_util
 
 JWT_ALGORITHM = "HS256"
 
@@ -30,14 +31,14 @@ def _pw_bytes(password: str) -> bytes:
 
 
 def _jwt_secret() -> str:
-    secret = os.getenv("AUTH_JWT_SECRET", "")
+    secret = env_util.get("AUTH_JWT_SECRET")
     if not secret:
         raise RuntimeError("AUTH_JWT_SECRET is not set — refusing to sign/verify tokens.")
     return secret
 
 
 def _token_ttl_seconds() -> int:
-    hours = float(os.getenv("AUTH_TOKEN_TTL_HOURS", "720"))  # default 30 days
+    hours = float(env_util.get("AUTH_TOKEN_TTL_HOURS", "720"))  # default 30 days
     return int(hours * 3600)
 
 
@@ -103,7 +104,7 @@ async def require_user(authorization: str = Header(default="")) -> str:
 
 async def require_admin(x_admin_token: str = Header(default="")) -> None:
     """Gate the user-creation endpoint with a static admin secret (personal use)."""
-    expected = os.getenv("ADMIN_SECRET", "")
+    expected = env_util.get("ADMIN_SECRET")
     if not expected:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

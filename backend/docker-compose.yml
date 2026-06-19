@@ -50,7 +50,7 @@ services:
       # which is meant for the app). Robust if the host's LAN IP changes.
       - LIVEKIT_URL=ws://livekit:7880
     volumes:
-      - ./:/app            # live source + persists the encrypted notes.db on the host
+      - ./:/app            # live source (notes persist in Postgres, not on disk)
     depends_on:
       - livekit
       - token-server

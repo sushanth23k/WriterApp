@@ -128,15 +128,19 @@ laptop:  poll http://VM:8080/health until it's up
 cp .deployenv.example .deployenv      # edit: project, region, zone, VM_NAME, VM_EXTERNAL_IP,
                                       # VM_INTERNAL_IP, AR_REPO
 cp backend/.env.example backend/.env  # fill in real secrets (DATABASE_URL, GROQ, DEEPGRAM,
-                                      # AUTH_JWT_SECRET, ADMIN_SECRET, SQLCIPHER_KEY…)
+                                      # AUTH_JWT_SECRET, ADMIN_SECRET…)
 ```
+> **`.env` format:** write `KEY=value` with **no spaces around `=` and no surrounding
+> quotes**. `deploy.sh` normalizes these before shipping (so a stray `DATABASE_URL = "…"`
+> won't break the VM), but keeping the file clean avoids surprises.
 Read the VM's external + internal (private) IPs from the Console, or:
 ```bash
 gcloud compute instances describe "$VM_NAME" --zone "$GCP_ZONE" \
   --format='value(networkInterfaces[0].accessConfigs[0].natIP, networkInterfaces[0].networkIP)'
 ```
-> `deploy.sh` sets the app-facing `LIVEKIT_URL` to `ws://VM_EXTERNAL_IP:7880` and the notes
-> DB path to the persistent volume when it ships `.env` — you don't hardcode those.
+> `deploy.sh` sets the app-facing `LIVEKIT_URL` to `ws://VM_EXTERNAL_IP:7880` when it ships
+> `.env` — you don't hardcode it. Notes live in Postgres (the `writer_app` schema), so the
+> VM keeps **no** persistent state of its own.
 
 ### B2. Deploy
 ```bash
@@ -147,9 +151,11 @@ as metadata, resets the VM, and **blocks until `/health` is green** (~1–3 min 
 *pulls*, it never builds). On timeout it prints the VM's serial-console deploy log.
 
 > **Secrets note:** they travel as instance metadata (visible to anyone with
-> `compute.instances.get` on the project) and land in a mode-600 `backend/.env` on the VM —
-> never in the repo. `livekit.yaml` is generated the same way (`use_external_ip: true` so
-> LiveKit finds the VM's public IP). For stricter handling, switch to **Secret Manager**.
+> `compute.instances.get` on the project) and are materialized only into a **RAM-backed
+> tmpfs** (`/run/dropnote`) on the VM — never written to its persistent disk, and gone on
+> shutdown; the startup script re-fetches them from metadata on every boot. `livekit.yaml`
+> is generated the same way (`use_external_ip: true` so LiveKit finds the VM's public IP).
+> For stricter handling, switch to **Secret Manager**.
 
 ### B3. Create your login (no sign-up UI)
 ```bash
@@ -170,10 +176,21 @@ pulls it on reset. No SSH, no GitHub.
 ---
 
 ## Point the app at the VM
-In `app/src/config.ts`, set `TOKEN_SERVER_URL` to your VM:
+In `app/src/config.ts`, set `TOKEN_SERVER_URL` to your VM (the IP `deploy.sh` prints at the
+end of a successful run):
 ```ts
 export const TOKEN_SERVER_URL = 'http://VM_EXTERNAL_IP:8080';
 ```
+
+> **Ephemeral-IP gotcha — "notes load but no speaking/listening":** the VM's external IP is
+> **ephemeral** and changes on stop/start. Two places depend on it: the app's
+> `TOKEN_SERVER_URL` (above) and the server's `LIVEKIT_URL` (the LiveKit address the app
+> connects to for voice). `deploy.sh` now **auto-resolves the VM's live IP from GCP** and
+> bakes it into `LIVEKIT_URL` + the health poll, so a stale `.deployenv` no longer breaks
+> voice or hangs the deploy — but you still must update `TOKEN_SERVER_URL` in `config.ts`
+> and rebuild the app whenever the IP changes. If notes work (REST) but voice is silent,
+> the IP drifted: re-run `deploy.sh` and update `config.ts` to the IP it prints. To stop
+> chasing IPs entirely, **reserve a static IP** (A3) or put a domain in front.
 
 **iOS ATS note:** iOS blocks plain `http://`/`ws://` to a bare IP by default. DropNote ships
 an Expo config plugin ([`app/plugins/withAtsArbitraryLoads.js`](app/plugins/withAtsArbitraryLoads.js))

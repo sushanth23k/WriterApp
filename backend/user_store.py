@@ -14,12 +14,12 @@ hardcoded. Passwords are never stored in the clear — only a bcrypt hash (see `
 
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import psycopg
 
+import env_util
 from auth import hash_password, verify_password
 
 SCHEMA = "user_schema"
@@ -47,7 +47,7 @@ class UserStore:
 
     @classmethod
     def from_env(cls) -> "UserStore":
-        return cls(dsn=os.getenv("DATABASE_URL", ""))
+        return cls(dsn=env_util.get("DATABASE_URL"))
 
     @contextmanager
     def _conn(self):

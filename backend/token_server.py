@@ -1,27 +1,28 @@
-"""Token server for DropNote.
+"""Token server + notes REST API for DropNote.
 
-Auth (DropNote): minting a LiveKit token now requires a valid session. The app signs
-in at ``POST /login`` (email + password, checked against the Postgres ``user_schema``
-store) to get a JWT, then sends it as ``Authorization: Bearer`` on ``POST /token``.
+Auth: minting a LiveKit token requires a valid session. The app signs in at
+``POST /login`` (email + password, checked against the Postgres ``user_schema`` store)
+to get a JWT, then sends it as ``Authorization: Bearer`` on every protected call.
 Accounts are created out-of-band via ``POST /users`` (no UI), guarded by an admin
 secret header — for personal use only. See ``auth.py`` and ``user_store.py``.
 
-v2.0: mints a short-lived LiveKit access token for a brand-new random room on
-every request (empty body) — preserved unchanged for backward compatibility.
+LiveKit token (``POST /token``): the request carries a ``mode`` ("main" | "note") and,
+for note mode, a ``doc_id``. The server picks a room name that encodes the state
+(``main-{rand}`` for navigation, ``note-{docId}`` for per-doc isolation) and stamps the
+room metadata (via RoomConfiguration) with {"mode", "doc_id", "user"} so the agent
+worker can route to the right agent AND scope every note operation to that user.
 
-v3.0 (additive): the request may carry a ``mode`` ("main" | "note") and, for note
-mode, a ``doc_id``. The server then:
-  - picks a room name that encodes the state — ``main-{rand}`` for navigation,
-    ``note-{docId}`` for per-doc isolation, and
-  - stamps the room's metadata (via RoomConfiguration) with {"mode", "doc_id"} so
-    the agent worker can read ``ctx.room.metadata`` and construct the right agent
-    (NavigatorAgent vs NoteAgent) loading only the appropriate context.
+Notes REST API (``/notes`` …): the app reads and writes its notes DIRECTLY here — it
+never depends on the LiveKit background data channel just to see its notes. Every
+endpoint is gated by the Bearer JWT and scoped to the signed-in user, so each account
+only ever touches its own notes (stored in the ``writer_app`` schema; see
+``notes_store.py``).
 """
 
 from __future__ import annotations
 
 import json
-import os
+import logging
 import uuid
 
 from dotenv import load_dotenv
@@ -30,16 +31,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from livekit import api
 from pydantic import BaseModel
 
+import env_util
 from auth import create_access_token, require_admin, require_user
+from notes_store import NotesStore
 from user_store import UserStore
 
 load_dotenv()
 
+logger = logging.getLogger("dropnote-token-server")
+
 # Public LiveKit URL handed to the app (the LAN address a phone can reach). The
-# agent container talks to LiveKit over the internal compose network instead.
-LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
-LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "")
-LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
+# agent container talks to LiveKit over the internal compose network instead. Read
+# through env_util so stray quotes/whitespace (e.g. from a compose env_file) are
+# tolerated rather than silently breaking the value.
+LIVEKIT_URL = env_util.get("LIVEKIT_URL")
+LIVEKIT_API_KEY = env_util.get("LIVEKIT_API_KEY")
+LIVEKIT_API_SECRET = env_util.get("LIVEKIT_API_SECRET")
 
 app = FastAPI(title="DropNote Token Server")
 
@@ -63,10 +70,22 @@ def get_user_store() -> UserStore:
     return _user_store
 
 
+# Lazily-opened Postgres notes store (notes live in the `writer_app` schema, scoped
+# per user). Opened on first use, mirroring the user store above.
+_notes_store: NotesStore | None = None
+
+
+def get_notes_store() -> NotesStore:
+    global _notes_store
+    if _notes_store is None:
+        _notes_store = NotesStore.from_env()
+    return _notes_store
+
+
 class TokenRequest(BaseModel):
     # Optional: caller can suggest an identity; otherwise we generate one.
     identity: str | None = None
-    # v3.0 state machine. None/"" => legacy v2.0 behavior (random room, no metadata).
+    # State machine. None/"" or "main" => navigator room; "note" => per-doc room.
     mode: str | None = None
     # Required when mode == "note": which doc this isolated conversation is about.
     doc_id: str | None = None
@@ -94,6 +113,36 @@ class LoginResponse(BaseModel):
 
 class CreatedUser(BaseModel):
     email: str
+
+
+# Vars the token server needs to actually function (LiveKit minting + Postgres auth).
+REQUIRED_ENV = (
+    "LIVEKIT_URL",
+    "LIVEKIT_API_KEY",
+    "LIVEKIT_API_SECRET",
+    "DATABASE_URL",
+    "AUTH_JWT_SECRET",
+)
+
+
+@app.on_event("startup")
+async def _check_env() -> None:
+    """Log a single, loud, actionable line if required config is missing.
+
+    Stores/secrets are opened lazily (so /health still answers for diagnosis), which
+    means a missing var would otherwise only surface as a 500 deep inside a request.
+    Surfacing it at startup makes a misconfigured deploy obvious in the VM serial log.
+    """
+    missing = [n for n in REQUIRED_ENV if not env_util.get(n)]
+    if missing:
+        logger.error(
+            "CONFIG ERROR — missing required environment variable(s): %s. "
+            "The server is up but auth/token minting will fail until these are set "
+            "in backend/.env (shipped to the VM at deploy time).",
+            ", ".join(missing),
+        )
+    else:
+        logger.info("env check ok — all required variables present")
 
 
 @app.get("/health")
@@ -139,21 +188,18 @@ async def create_token(
     mode = (req.mode if req and req.mode else "").strip().lower()
     doc_id = (req.doc_id if req and req.doc_id else "").strip()
 
-    # Choose the room (which encodes the state) and the metadata the agent reads.
-    metadata: dict | None = None
-    if mode == "main":
-        # Fresh main room per navigation session.
-        room = f"main-{uuid.uuid4().hex[:12]}"
-        metadata = {"mode": "main"}
-    elif mode == "note":
+    # Choose the room (which encodes the state) and the metadata the agent reads. The
+    # authenticated user's email is always stamped so the worker scopes notes to them.
+    if mode == "note":
         if not doc_id:
             raise HTTPException(status_code=400, detail="mode 'note' requires a doc_id.")
         # Per-doc room enforces context isolation (one room == one doc).
         room = f"note-{doc_id}"
-        metadata = {"mode": "note", "doc_id": doc_id}
+        metadata = {"mode": "note", "doc_id": doc_id, "user": user}
     else:
-        # Legacy v2.0: fresh random room, no metadata, MemoryAssistant path.
-        room = f"voice-memory-{uuid.uuid4().hex[:12]}"
+        # Default/main: a fresh navigator room per session.
+        room = f"main-{uuid.uuid4().hex[:12]}"
+        metadata = {"mode": "main", "user": user}
 
     # Identity is derived from the authenticated user (unique per LiveKit room join).
     identity = f"{user}-{uuid.uuid4().hex[:6]}"
@@ -171,13 +217,12 @@ async def create_token(
         .with_identity(identity)
         .with_name(identity)
         .with_grants(grants)
-    )
-    if metadata is not None:
-        # Stamp room metadata so the agent can route on ctx.room.metadata. The room
-        # is created (with this metadata) when the participant joins.
-        builder = builder.with_room_config(
+        # Stamp room metadata so the agent can route on ctx.room.metadata (and scope
+        # notes to `user`). The room is created (with this metadata) on participant join.
+        .with_room_config(
             api.RoomConfiguration(name=room, metadata=json.dumps(metadata))
         )
+    )
 
     token = builder.to_jwt()
 
@@ -185,6 +230,114 @@ async def create_token(
         token=token, url=LIVEKIT_URL, room=room, identity=identity,
         mode=(mode or None), doc_id=(doc_id or None),
     )
+
+
+# ============================================================================
+# Notes REST API — direct, per-user store/get (no LiveKit background channel).
+#
+# Every endpoint is gated by `require_user` (the Bearer JWT), and the resolved email
+# scopes the query, so a user can only ever touch their OWN notes (writer_app schema).
+# ============================================================================
+
+
+class DocIn(BaseModel):
+    title: str = ""
+    description: str = ""
+
+
+class DocPatch(BaseModel):
+    title: str | None = None
+    description: str | None = None
+
+
+class EntryIn(BaseModel):
+    text: str
+
+
+class EntryPatch(BaseModel):
+    text: str
+
+
+@app.get("/notes")
+async def list_docs(user: str = Depends(require_user)) -> list[dict]:
+    """List the signed-in user's docs (id/title/description, no entries)."""
+    store = get_notes_store()
+    return [d.to_dict() for d in store.list_docs(user)]
+
+
+@app.post("/notes", status_code=201)
+async def create_doc(body: DocIn, user: str = Depends(require_user)) -> dict:
+    """Create a new doc owned by the signed-in user."""
+    store = get_notes_store()
+    doc = store.create_doc(user, body.title, body.description)
+    return doc.to_dict()
+
+
+@app.get("/notes/{doc_id}")
+async def get_doc(doc_id: str, user: str = Depends(require_user)) -> dict:
+    """Fetch one doc WITH its entries (404 if it isn't the user's)."""
+    store = get_notes_store()
+    doc = store.get_doc_full(user, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Note not found.")
+    return doc.to_dict()
+
+
+@app.patch("/notes/{doc_id}")
+async def update_doc(
+    doc_id: str, body: DocPatch, user: str = Depends(require_user)
+) -> dict:
+    """Update a doc's title and/or description."""
+    store = get_notes_store()
+    doc = store.update_doc(user, doc_id, title=body.title, description=body.description)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Note not found.")
+    return doc.to_dict()
+
+
+@app.delete("/notes/{doc_id}", status_code=204)
+async def delete_doc(doc_id: str, user: str = Depends(require_user)) -> None:
+    """Delete a doc and all of its entries."""
+    store = get_notes_store()
+    if not store.delete_doc(user, doc_id):
+        raise HTTPException(status_code=404, detail="Note not found.")
+
+
+@app.post("/notes/{doc_id}/entries", status_code=201)
+async def add_entry(
+    doc_id: str, body: EntryIn, user: str = Depends(require_user)
+) -> dict:
+    """Add an entry to one of the user's docs."""
+    store = get_notes_store()
+    entry = store.add_entry(user, doc_id, body.text)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Note not found.")
+    return entry.to_dict()
+
+
+@app.patch("/notes/{doc_id}/entries/{entry_id}")
+async def update_entry(
+    doc_id: str, entry_id: str, body: EntryPatch, user: str = Depends(require_user)
+) -> dict:
+    """Update one entry's text (the entry must belong to the user's doc)."""
+    store = get_notes_store()
+    existing = store.get_entry(user, entry_id)
+    if existing is None or existing.doc_id != doc_id:
+        raise HTTPException(status_code=404, detail="Entry not found.")
+    entry = store.update_entry(user, entry_id, body.text)
+    return entry.to_dict()
+
+
+@app.delete("/notes/{doc_id}/entries/{entry_id}", status_code=204)
+async def delete_entry(
+    doc_id: str, entry_id: str, user: str = Depends(require_user)
+) -> None:
+    """Delete one entry from the user's doc."""
+    store = get_notes_store()
+    existing = store.get_entry(user, entry_id)
+    if existing is None or existing.doc_id != doc_id:
+        raise HTTPException(status_code=404, detail="Entry not found.")
+    store.delete_entry(user, entry_id)
 
 
 if __name__ == "__main__":

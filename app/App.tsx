@@ -143,12 +143,14 @@ function AuthedApp({
           onError={(e) => setError(e?.message ?? String(e))}
         >
           {screen.mode === 'main' ? (
-            <MainScreen onNavigate={goNote} onSignOut={onSignOut} />
+            <MainScreen token={token} onNavigate={goNote} onSignOut={onSignOut} />
           ) : (
             <NoteScreen
+              token={token}
               docId={screen.docId}
               initialTitle={screen.title}
               onBack={goMain}
+              onSignOut={onSignOut}
             />
           )}
         </LiveKitRoom>

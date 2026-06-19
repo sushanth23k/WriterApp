@@ -8,10 +8,8 @@ fastapi
 uvicorn[standard]
 python-dotenv
 
-# v2.0 encrypted notes store (SQLCipher / AES-256 at rest)
-sqlcipher3
-
-# Authentication: Postgres-backed user store (user_schema) + bcrypt + JWT
+# Postgres: per-user notes (writer_app schema) + auth user store (user_schema),
+# bcrypt + JWT. Encryption at rest is handled by Postgres/Supabase.
 psycopg[binary]
 bcrypt
 pyjwt

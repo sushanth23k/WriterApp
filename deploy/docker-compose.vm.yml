@@ -35,11 +35,9 @@ services:
     environment:
       # Agent talks to LiveKit over the internal compose network (not the public IP).
       - LIVEKIT_URL=ws://livekit:7880
-    volumes:
-      - dropnote-data:/app/data    # persist the encrypted notes.db across restarts
     depends_on:
       - livekit
       - token-server
 
-volumes:
-  dropnote-data:
+# No named volumes: notes now live in Postgres (writer_app schema), so the VM holds no
+# persistent app state — nothing to back up or migrate between deploys.

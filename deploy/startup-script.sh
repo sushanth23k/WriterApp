@@ -19,10 +19,25 @@ META="http://metadata.google.internal/computeMetadata/v1/instance"
 meta()  { curl -fsS -H "Metadata-Flavor: Google" "$META/attributes/$1" 2>/dev/null || true; }
 token() { curl -fsS -H "Metadata-Flavor: Google" "$META/service-accounts/default/token"; }
 
-APP_DIR=/opt/dropnote
+# Materialize config in a tmpfs / RAM-backed dir so the secrets are NEVER written to the
+# VM's persistent disk. The startup script re-runs on every boot/reset and re-fetches
+# everything from instance metadata, so there is nothing to persist — combined with notes
+# now living in Postgres, the VM is fully stateless.
+#
+# We pick the first writable tmpfs among /run, /dev/shm, /tmp. This also fixes a real
+# deploy break: the old path was /opt/dropnote, but on Container-Optimized OS (which
+# DEPLOY.md recommends) /opt is READ-ONLY, so `mkdir -p /opt/dropnote` failed under
+# `set -e` and aborted the whole deploy.
+umask 077
+APP_DIR=""
+for cand in /run/dropnote /dev/shm/dropnote /tmp/dropnote; do
+  if mkdir -p "$cand" 2>/dev/null; then APP_DIR="$cand"; break; fi
+done
+[ -n "$APP_DIR" ] || { echo "FATAL: no writable tmpfs dir for config (tried /run /dev/shm /tmp)" >&2; exit 1; }
+echo "using APP_DIR=$APP_DIR (RAM-backed; not persisted)"
+
 DROPNOTE_IMAGE="$(meta dropnote-image)"
 AR_HOST="${DROPNOTE_IMAGE%%/*}"   # e.g. us-central1-docker.pkg.dev
-umask 077
 
 # --- 1. Ensure Docker + compose plugin (ONE-TIME; the `if` makes reboots no-ops) ---
 if ! command -v docker >/dev/null 2>&1; then
@@ -38,11 +53,23 @@ if ! command -v docker >/dev/null 2>&1; then
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 fi
 
-# --- 2. Materialize config from metadata (secrets never leave the VM) ---
-mkdir -p "$APP_DIR"
+# --- 2. Materialize config from metadata into the RAM-backed APP_DIR (created above) ---
 meta dropnote-env  > "$APP_DIR/.env"
 meta livekit-yaml  > "$APP_DIR/livekit.yaml"
 meta compose-file  > "$APP_DIR/docker-compose.vm.yml"
+
+# Fail loudly (into the serial log) if any piece of config is missing, instead of
+# starting a half-configured stack that fails mysteriously later.
+for f in .env livekit.yaml docker-compose.vm.yml; do
+  if [ ! -s "$APP_DIR/$f" ]; then
+    echo "FATAL: $APP_DIR/$f is empty — metadata not set? Re-run deploy/deploy.sh." >&2
+    exit 1
+  fi
+done
+if [ -z "$DROPNOTE_IMAGE" ]; then
+  echo "FATAL: dropnote-image metadata is empty — Re-run deploy/deploy.sh." >&2
+  exit 1
+fi
 
 # --- 3. Authenticate Docker to Artifact Registry via the VM service account ---
 ACCESS_TOKEN="$(token | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"

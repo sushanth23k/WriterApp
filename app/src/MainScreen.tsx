@@ -1,8 +1,10 @@
 // MAIN state — browse / navigate / create. The "navigator" conversation lets the
 // user pick a doc by voice (title/id/description) or create one; tapping a card
-// works too. Receives only the docs LIST over the data channel.
+// works too. Notes are loaded and mutated DIRECTLY over the REST API (scoped to the
+// signed-in user); the data channel is only used for live updates while the voice
+// agent is mid-call.
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   FlatList,
   Modal,
@@ -14,15 +16,19 @@ import {
 } from 'react-native';
 import { useRoomContext } from '@livekit/react-native';
 
+import { createDoc, deleteDoc as apiDeleteDoc, listDocs } from './api';
+import { UnauthorizedError } from './auth';
 import { colors, radius, space, type } from './theme';
 import { TOPICS, type Doc } from './types';
-import { useConnState, useDataTopic, useMic, usePublish, useTranscript } from './livekit';
+import { useConnState, useDataTopic, useMic, useTranscript } from './livekit';
 import { CommandsHint, MicButton, SectionLabel, StatusPill, TranscriptView } from './ui';
 
 export function MainScreen({
+  token,
   onNavigate,
   onSignOut,
 }: {
+  token: string;
   onNavigate: (docId: string, title: string) => void;
   onSignOut: () => void;
 }) {
@@ -31,26 +37,30 @@ export function MainScreen({
   const [creating, setCreating] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
-  const pendingOpen = useRef<string | null>(null); // title to auto-open after create
 
   const connState = useConnState(room);
   const connected = connState === 'connected';
   const [micOn, toggleMic, setMic] = useMic(room);
   const transcript = useTranscript(room);
-  const publish = usePublish(room);
 
-  // Docs list broadcasts from the navigator agent.
+  // Load the user's docs directly over REST (an expired session signs them out).
+  const loadDocs = useCallback(async () => {
+    try {
+      setDocs(await listDocs(token));
+    } catch (e) {
+      if (e instanceof UnauthorizedError) onSignOut();
+    }
+  }, [token, onSignOut]);
+
+  useEffect(() => {
+    loadDocs();
+  }, [loadDocs]);
+
+  // Live updates while a voice call is active: the agent broadcasts the docs list
+  // after a voice-driven change so the list stays current without a manual refetch.
   useDataTopic(room, TOPICS.docs, (msg) => {
     if (msg?.type !== 'docs' || !Array.isArray(msg.docs)) return;
     setDocs(msg.docs);
-    // If we just created a doc by typing, auto-open it once it appears.
-    if (pendingOpen.current) {
-      const found = msg.docs.find((d: Doc) => d.title === pendingOpen.current);
-      if (found) {
-        pendingOpen.current = null;
-        onNavigate(found.id, found.title);
-      }
-    }
   });
 
   // Voice-driven navigation: the agent resolved/created a doc.
@@ -66,23 +76,31 @@ export function MainScreen({
     if (msg?.type === 'control' && msg.action === 'stop') setMic(false);
   });
 
-  const submitCreate = useCallback(() => {
+  const submitCreate = useCallback(async () => {
     const title = newTitle.trim();
     if (!title) return;
-    pendingOpen.current = title;
-    publish(TOPICS.docsEdit, {
-      action: 'create',
-      title,
-      description: newDesc.trim(),
-    });
     setNewTitle('');
     setNewDesc('');
     setCreating(false);
-  }, [newTitle, newDesc, publish]);
+    try {
+      const doc = await createDoc(token, title, newDesc.trim());
+      await loadDocs();
+      onNavigate(doc.id, doc.title); // open the freshly-created note
+    } catch (e) {
+      if (e instanceof UnauthorizedError) onSignOut();
+    }
+  }, [newTitle, newDesc, token, loadDocs, onNavigate, onSignOut]);
 
   const deleteDoc = useCallback(
-    (id: string) => publish(TOPICS.docsEdit, { action: 'delete', id }),
-    [publish],
+    async (id: string) => {
+      try {
+        await apiDeleteDoc(token, id);
+        await loadDocs();
+      } catch (e) {
+        if (e instanceof UnauthorizedError) onSignOut();
+      }
+    },
+    [token, loadDocs, onSignOut],
   );
 
   return (
@@ -125,9 +143,7 @@ export function MainScreen({
         contentContainerStyle={docs.length === 0 && styles.emptyWrap}
         ListEmptyComponent={
           <Text style={styles.empty}>
-            {connected
-              ? 'No notes yet. Say “make a new note about…”, or tap ＋ New note.'
-              : 'Connecting…'}
+            No notes yet. Say “make a new note about…”, or tap ＋ New note.
           </Text>
         }
         renderItem={({ item }) => (
