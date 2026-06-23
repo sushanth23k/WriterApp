@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
+from typing import AsyncIterable
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -24,6 +26,7 @@ from livekit.agents import (
     Agent,
     AgentSession,
     JobContext,
+    ModelSettings,
     RunContext,
     WorkerOptions,
     cli,
@@ -81,6 +84,93 @@ SPEAK_NATURALLY = (
     "be mixed together or overlap."
 )
 
+# Appended to EVERY agent. The single biggest conversation bug is the model SAYING it
+# will do something (open a note, go back, add a line) without actually emitting the
+# matching tool call — so the app never moves and nothing is saved. Make the contract
+# explicit: words describing an action must be backed by the tool call in the same turn.
+ACT_DONT_PROMISE = (
+    "ACT, DON'T PROMISE. If you tell the user you are opening a note, creating one, "
+    "going back, stopping, adding, changing, or removing something, you MUST make the "
+    "matching tool call in that SAME turn. Never say you did or will do something "
+    "without actually calling the tool, and never just promise to do it 'next' — do it "
+    "now. If you cannot do it, say so plainly instead of pretending."
+)
+
+
+# ---------------------------------------------------------------------------
+# TTS / transcript safety net.
+#
+# The instructions above tell the model to speak plainly, but llama-3.3-70b still
+# occasionally leaks tool/code machinery into its spoken text (e.g. "function
+# add_entry(...)", snake_case ids, stray semicolons). The voice reads whatever text
+# it is handed, so we scrub that text in the pipeline BEFORE it reaches TTS and the
+# on-screen transcript. This is a deterministic backstop, independent of the model.
+# ---------------------------------------------------------------------------
+
+_RE_FENCE = re.compile(r"```.*?```", re.S)        # fenced code blocks
+_RE_INLINE = re.compile(r"`[^`]*`")               # `inline code`
+_RE_CALL = re.compile(r"\b[A-Za-z_]\w*\([^)]*\)")  # foo(...) / add_entry(milk)
+_RE_FUNCWORD = re.compile(r"\bfunctions?\b", re.I)  # the literal word "function"
+_RE_UNDERSCORE = re.compile(r"(?<=\w)_(?=\w)")     # snake_case joiner -> space
+_RE_CODEPUNCT = re.compile(r"[{}\[\]<>`|\\]")      # punctuation TTS reads as noise
+_RE_SEMI = re.compile(r"\s*;\s*")                  # semicolons -> sentence break
+_RE_SPACE_BEFORE_PUNCT = re.compile(r"\s+([.,!?])")  # " ." -> "."
+_RE_DUP_PUNCT = re.compile(r"([.,!?])(?:\s*[.,!?])+")  # ".." / ". ." -> "."
+_RE_WS = re.compile(r"\s{2,}")
+
+
+def _spoken_text(text: str) -> str:
+    """Strip code/tool machinery from text so only plain language is spoken/shown.
+
+    Conservative on purpose: it removes call-shaped tokens and code punctuation but
+    leaves normal parentheticals (e.g. "milk (oat)") and ordinary words untouched.
+    """
+    t = _RE_FENCE.sub(" ", text)
+    t = _RE_INLINE.sub(" ", t)
+    t = _RE_CALL.sub(" ", t)
+    t = _RE_FUNCWORD.sub(" ", t)
+    t = _RE_UNDERSCORE.sub(" ", t)
+    t = _RE_CODEPUNCT.sub(" ", t)
+    t = _RE_SEMI.sub(". ", t)
+    t = _RE_SPACE_BEFORE_PUNCT.sub(r"\1", t)
+    t = _RE_DUP_PUNCT.sub(r"\1", t)
+    return _RE_WS.sub(" ", t).strip()
+
+
+async def _sanitized_stream(text: AsyncIterable[str]) -> AsyncIterable[str]:
+    """Buffer one spoken segment, scrub it, then emit it. Replies are 1–2 sentences,
+    so buffering the whole segment (rather than risking code tokens split across
+    streamed chunks) costs no meaningful latency and makes the scrub reliable."""
+    buf = ""
+    async for chunk in text:
+        buf += chunk
+    cleaned = _spoken_text(buf)
+    if cleaned:
+        yield cleaned
+
+
+class SpokenAgent(Agent):
+    """Base agent whose spoken + transcribed text is guaranteed plain language.
+
+    Both the MAIN and NOTE agents extend this so the TTS sanitizer applies everywhere.
+    """
+
+    async def tts_node(
+        self, text: AsyncIterable[str], model_settings: ModelSettings
+    ):
+        async for frame in Agent.default.tts_node(
+            self, _sanitized_stream(text), model_settings
+        ):
+            yield frame
+
+    async def transcription_node(
+        self, text: AsyncIterable[str], model_settings: ModelSettings
+    ):
+        async for seg in Agent.default.transcription_node(
+            self, _sanitized_stream(text), model_settings
+        ):
+            yield seg
+
 
 # =====================================================================
 # v3.0 MAIN state — NavigatorAgent (context = docs LIST only)
@@ -101,10 +191,32 @@ NAVIGATOR_INSTRUCTIONS = (
     "'Groceries') — never a generic title like 'New Note' — plus a one-line description. "
     "If several notes could match, ask a brief clarifying question naming the "
     "candidates. Never read ids out loud — they are internal. "
+    "Do NOT tell the user you're opening or creating a note unless you are calling "
+    "open_note or create_note in the same turn — that is the whole point of this state. "
     "If the user wants to end the conversation (e.g. 'stop it', 'we're done', "
     "'end'), call stop_conversation. "
-    + SPEAK_NATURALLY
+    + ACT_DONT_PROMISE + " " + SPEAK_NATURALLY
 )
+
+
+# Filler words a user wraps around the actual note name ("open my X note please").
+# Stripped before the per-word title/description search so they don't drag in noise.
+_OPEN_STOPWORDS = {
+    "open", "go", "to", "the", "a", "an", "my", "note", "notes", "please",
+    "about", "for", "called", "named", "list", "show", "me", "into", "in", "on",
+}
+
+
+def _search_by_words(store, query: str) -> list:
+    """Fallback resolver: search each meaningful word in the query and union matches
+    (deduped by id), so a loosely-phrased request still resolves to a note."""
+    words = [w for w in re.findall(r"[A-Za-z0-9]+", query.lower())
+             if w not in _OPEN_STOPWORDS and len(w) > 1]
+    seen: dict[str, object] = {}
+    for w in words:
+        for d in store.search_docs(w):
+            seen.setdefault(d.id, d)
+    return list(seen.values())
 
 
 def _docs_for_context(docs: list) -> str:
@@ -116,7 +228,7 @@ def _docs_for_context(docs: list) -> str:
         "\n".join(lines)
 
 
-class NavigatorAgent(Agent):
+class NavigatorAgent(SpokenAgent):
     """MAIN-state agent. Sees only the docs list; opens or creates docs."""
 
     def __init__(self, docs: list) -> None:
@@ -135,8 +247,13 @@ class NavigatorAgent(Agent):
         q = query.strip()
         # 1) exact id
         doc = store.get_doc(q)
-        # 2) title/description search
+        # 2) title/description search on the whole phrase
         matches = store.search_docs(q) if not doc else []
+        # 3) token fallback: the user rarely says the title verbatim ("open my grocery
+        #    note" won't substring-match "Groceries"), so if the whole phrase missed,
+        #    search each meaningful word and union the hits before giving up.
+        if not doc and not matches:
+            matches = _search_by_words(store, q)
         if not doc and len(matches) == 1:
             doc = matches[0]
         if doc:
@@ -189,8 +306,19 @@ NOTE_INSTRUCTIONS = (
     "bullet points, no emoji. "
     "Everything the user says is about THIS note. As they talk, jot things down by "
     "calling add_entry; change a line with update_entry and remove one with "
-    "delete_entry; use list_entries when you need an entry's id first (never read ids "
-    "aloud). "
+    "delete_entry. "
+    "Your in-context list of entries can fall behind after a few edits, so ALWAYS call "
+    "list_entries to get the CURRENT text and ids immediately before you update_entry "
+    "or delete_entry, and act on exactly what it returns — never guess or reuse an old "
+    "id, and never read ids aloud. "
+    "Keep this note clean, concise, and non-redundant. Before adding something, check "
+    "whether it is already captured: if a point already exists, EXTEND or update that "
+    "entry instead of adding a duplicate or near-duplicate, and merge closely related "
+    "details into ONE clear, self-contained entry rather than scattering fragments. "
+    "Each entry should be a single concise point. "
+    "PRESERVE what's already there: adding or editing one point must never drop or "
+    "rewrite the others. Only delete an entry when the user clearly asks to remove that "
+    "specific thing — when in doubt, add or update, never delete. "
     "Keep the note's title and description ACCURATE as its content grows. Whenever you "
     "add or change entries in a way that DRASTICALLY shifts or clarifies what this note "
     "is about, call update_doc_meta to refresh the title and/or description so they "
@@ -205,7 +333,7 @@ NOTE_INSTRUCTIONS = (
     "'take me back', 'back to my notes'), call go_back. If they want to end the "
     "conversation entirely (e.g. 'stop it', 'we're done', 'end'), call "
     "stop_conversation. "
-    + SPEAK_NATURALLY
+    + ACT_DONT_PROMISE + " " + SPEAK_NATURALLY
 )
 
 
@@ -222,7 +350,7 @@ def _note_for_context(doc) -> str:
     )
 
 
-class NoteAgent(Agent):
+class NoteAgent(SpokenAgent):
     """NOTE-state agent. Loaded with a single doc; every tool is scoped to it."""
 
     def __init__(self, doc) -> None:
@@ -239,6 +367,12 @@ class NoteAgent(Agent):
         text = text.strip()
         if not text:
             return "There was nothing to add."
+        # Backstop against blatant duplicates: if this exact line already exists,
+        # don't add it again (the instructions also steer the model toward merging).
+        norm = text.casefold()
+        if any(e.text.strip().casefold() == norm for e in ud.store.list_entries(ud.doc_id)):
+            logger.info("add_entry[%s]: skipped duplicate %r", ud.doc_id, text)
+            return "That's already in this note."
         entry = ud.store.add_entry(ud.doc_id, text)
         if entry is None:
             return "I couldn't find this note to add to."
