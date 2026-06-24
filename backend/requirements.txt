@@ -13,3 +13,9 @@ python-dotenv
 psycopg[binary]
 bcrypt
 pyjwt
+
+# NOTE: this base file is Linux-safe and is what the standard Docker image installs
+# (cloud engine = Deepgram + Groq). The on-device "hybrid" engine adds extra deps that
+# are platform-specific — install the matching file on top of this one:
+#   * macOS native worker : requirements-local-mac.txt   (MLX)
+#   * Linux/Docker (GCP)  : requirements-local-linux.txt (faster-whisper)

@@ -48,6 +48,9 @@ LIVEKIT_URL = env_util.get("LIVEKIT_URL")
 LIVEKIT_API_KEY = env_util.get("LIVEKIT_API_KEY")
 LIVEKIT_API_SECRET = env_util.get("LIVEKIT_API_SECRET")
 
+# Fallback inference stack when the app doesn't specify one (see TokenRequest.engine).
+DEFAULT_ENGINE = (env_util.get("DEFAULT_ENGINE") or "cloud").strip().lower()
+
 app = FastAPI(title="DropNote Token Server")
 
 app.add_middleware(
@@ -89,6 +92,10 @@ class TokenRequest(BaseModel):
     mode: str | None = None
     # Required when mode == "note": which doc this isolated conversation is about.
     doc_id: str | None = None
+    # Inference stack the agent should run: "cloud" (all Deepgram/Groq) or "hybrid"
+    # (on-device MLX STT+TTS, Groq LLM). Chosen by the app's toggle; defaults to
+    # DEFAULT_ENGINE.
+    engine: str | None = None
 
 
 class TokenResponse(BaseModel):
@@ -98,6 +105,7 @@ class TokenResponse(BaseModel):
     identity: str
     mode: str | None = None
     doc_id: str | None = None
+    engine: str | None = None
 
 
 class Credentials(BaseModel):
@@ -187,19 +195,25 @@ async def create_token(
 
     mode = (req.mode if req and req.mode else "").strip().lower()
     doc_id = (req.doc_id if req and req.doc_id else "").strip()
+    engine = (req.engine if req and req.engine else "").strip().lower()
+    if engine not in ("cloud", "hybrid"):
+        engine = DEFAULT_ENGINE
 
     # Choose the room (which encodes the state) and the metadata the agent reads. The
     # authenticated user's email is always stamped so the worker scopes notes to them.
+    # The engine is part of the room name too: room metadata is only stamped at room
+    # creation, so encoding the engine here guarantees a freshly-created room (and a
+    # fresh agent) whenever the user flips the local/cloud toggle.
     if mode == "note":
         if not doc_id:
             raise HTTPException(status_code=400, detail="mode 'note' requires a doc_id.")
-        # Per-doc room enforces context isolation (one room == one doc).
-        room = f"note-{doc_id}"
-        metadata = {"mode": "note", "doc_id": doc_id, "user": user}
+        # Per-(doc, engine) room enforces context isolation (one room == one doc).
+        room = f"note-{engine}-{doc_id}"
+        metadata = {"mode": "note", "doc_id": doc_id, "user": user, "engine": engine}
     else:
         # Default/main: a fresh navigator room per session.
-        room = f"main-{uuid.uuid4().hex[:12]}"
-        metadata = {"mode": "main", "user": user}
+        room = f"main-{engine}-{uuid.uuid4().hex[:12]}"
+        metadata = {"mode": "main", "user": user, "engine": engine}
 
     # Identity is derived from the authenticated user (unique per LiveKit room join).
     identity = f"{user}-{uuid.uuid4().hex[:6]}"
@@ -228,7 +242,7 @@ async def create_token(
 
     return TokenResponse(
         token=token, url=LIVEKIT_URL, room=room, identity=identity,
-        mode=(mode or None), doc_id=(doc_id or None),
+        mode=(mode or None), doc_id=(doc_id or None), engine=engine,
     )
 
 

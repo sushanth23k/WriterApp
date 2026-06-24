@@ -23,6 +23,7 @@ import { AudioSession, LiveKitRoom } from '@livekit/react-native';
 
 import { fetchToken } from './src/api';
 import { UnauthorizedError, useAuth } from './src/auth';
+import { useEngine } from './src/engine';
 import { LoginScreen } from './src/LoginScreen';
 import { MainScreen } from './src/MainScreen';
 import { NoteScreen } from './src/NoteScreen';
@@ -59,6 +60,7 @@ function AuthedApp({
   const [conn, setConn] = useState<Conn | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const [engine, setEngine] = useEngine();
   const audioStarted = useRef(false);
 
   // Start the audio session once (mic capture + playback routing).
@@ -82,8 +84,8 @@ function AuthedApp({
       try {
         const data =
           screen.mode === 'note'
-            ? await fetchToken('note', token, screen.docId)
-            : await fetchToken('main', token);
+            ? await fetchToken('note', token, screen.docId, engine)
+            : await fetchToken('main', token, undefined, engine);
         if (!cancelled) setConn({ url: data.url, token: data.token });
       } catch (e: any) {
         if (cancelled) return;
@@ -97,7 +99,7 @@ function AuthedApp({
     return () => {
       cancelled = true;
     };
-  }, [screen, retry, token, onSignOut]);
+  }, [screen, retry, token, engine, onSignOut]);
 
   const goNote = useCallback(
     (docId: string, title: string) => setScreen({ mode: 'note', docId, title }),
@@ -143,7 +145,13 @@ function AuthedApp({
           onError={(e) => setError(e?.message ?? String(e))}
         >
           {screen.mode === 'main' ? (
-            <MainScreen token={token} onNavigate={goNote} onSignOut={onSignOut} />
+            <MainScreen
+              token={token}
+              onNavigate={goNote}
+              onSignOut={onSignOut}
+              engine={engine}
+              onSetEngine={setEngine}
+            />
           ) : (
             <NoteScreen
               token={token}

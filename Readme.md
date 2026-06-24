@@ -295,3 +295,31 @@ the VM** — plus the iOS ATS caveat for bare-IP backends.
 
 To put the iOS app on **another iPhone** (TestFlight, or sideloading an `.ipa` with the free
 Personal Team), see **[DISTRIBUTE.md](DISTRIBUTE.md)**.
+
+## Voice engines (Cloud / Hybrid) & on-device models
+
+The app has a **Voice Engine** toggle:
+
+| Engine | STT | LLM | TTS | Audio leaves device? |
+|--------|-----|-----|-----|----------------------|
+| **Cloud** | Deepgram | Groq llama-3.3-70b | Deepgram | yes |
+| **Hybrid** | Whisper small.en (on-device) | Groq llama-3.3-70b | Kokoro-82M (on-device) | no |
+
+`Hybrid` runs STT + TTS locally (the LLM stays on Groq for reliable tool-calling). The
+STT backend is chosen by platform automatically — **MLX** on macOS, **faster-whisper**
+on Linux — so the same code runs on a Mac and on a Linux VM.
+
+**Model weights are never committed to git** (`models/` is git-ignored). Download them
+per-machine with:
+
+```bash
+bash scripts/download_models.sh     # auto-picks MLX (macOS) or faster-whisper (Linux)
+```
+
+This fetches Whisper small.en + Kokoro-82M (~0.4–0.55 GB) into `models/`. Then:
+
+- **Run locally on your Mac** → [backend/LOCAL_INFERENCE.md](backend/LOCAL_INFERENCE.md)
+  (the agent runs natively; MLX can't run in Docker).
+- **Deploy on-device audio to a GCP VM** → [DEPLOY_LOCAL_GCP.md](DEPLOY_LOCAL_GCP.md)
+  (Docker image with faster-whisper + Kokoro; weights downloaded onto the VM, never in
+  git or the image).

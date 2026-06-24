@@ -1,0 +1,47 @@
+# Compose run ON THE VM for the ON-DEVICE ("hybrid") deployment — like
+# docker-compose.vm.yml, but the agent (and token server) use the local image built
+# from backend/Dockerfile.local (faster-whisper STT + Kokoro TTS), and the agent mounts
+# the model WEIGHTS from a host directory on the VM.
+#
+# Weights are NOT in the image or in git: you download them onto the VM's disk once
+# (see DEPLOY_LOCAL_GCP.md) into ${MODELS_HOST_DIR:-/var/dropnote/models}, and this
+# file bind-mounts that into the agent at /models (read-only). The image's MODELS_DIR
+# is already /models and HF_HUB_OFFLINE=1, so the worker never hits the network for STT/TTS.
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: always
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"        # WebSocket signaling
+      - "7881:7881"        # WebRTC over TCP (fallback)
+      - "7882:7882/udp"    # WebRTC media (single multiplexed UDP port)
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+
+  token-server:
+    image: ${DROPNOTE_IMAGE:?set DROPNOTE_IMAGE}
+    restart: always
+    command: python token_server.py
+    env_file: .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      - livekit
+
+  agent:
+    image: ${DROPNOTE_IMAGE:?set DROPNOTE_IMAGE}
+    restart: always
+    command: python agent.py start
+    env_file: .env
+    environment:
+      - LIVEKIT_URL=ws://livekit:7880
+      - MODELS_DIR=/models
+      - STT_BACKEND=faster
+      - HF_HUB_OFFLINE=1
+    volumes:
+      # On-device weights downloaded onto the VM disk (see DEPLOY_LOCAL_GCP.md).
+      - ${MODELS_HOST_DIR:-/var/dropnote/models}:/models:ro
+    depends_on:
+      - livekit
+      - token-server

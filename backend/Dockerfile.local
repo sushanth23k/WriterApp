@@ -1,0 +1,46 @@
+# Agent image WITH on-device audio (engine=hybrid) for a Linux/CPU GCP VM.
+#
+# Adds faster-whisper STT (CTranslate2) + Kokoro TTS on top of the base backend. MLX is
+# Apple-Silicon-only, so the Linux build uses faster-whisper instead (see stt/__init__.py,
+# which auto-selects the backend by platform). The LLM still runs on Groq.
+#
+# Model WEIGHTS are NOT baked into this image — they're downloaded onto the VM and
+# mounted at /models (see deploy/docker-compose.vm-local.yml + DEPLOY_LOCAL_GCP.md),
+# so the image stays small and weights never go through git or the registry.
+#
+#   docker build -f backend/Dockerfile.local -t dropnote-backend-local backend/
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    # On-device audio loads from the mounted weights dir; force the Linux STT backend.
+    MODELS_DIR=/models \
+    STT_BACKEND=faster
+# NOTE: HF_HUB_OFFLINE is set at RUNTIME (deploy/docker-compose.vm-local.yml), NOT here —
+# setting it during build would block the model pre-cache / spaCy download below.
+
+# System deps: CA certs (TLS), supervisor (combined-image option), espeak-ng (Kokoro
+# phonemizer), libgomp1 (CTranslate2/faster-whisper OpenMP runtime).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates supervisor espeak-ng libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install CPU-only torch FIRST (Kokoro dep) from the CPU wheel index, so the big CUDA
+# build is never pulled, then the rest of the Linux on-device deps.
+COPY requirements.txt requirements-local-linux.txt ./
+RUN pip install --index-url https://download.pytorch.org/whl/cpu torch \
+    && pip install -r requirements-local-linux.txt
+
+# Pre-cache the spaCy English model that Kokoro/misaki needs for G2P, so the worker
+# never downloads it at runtime (it would otherwise fetch en_core_web_sm on first use).
+RUN python -m spacy download en_core_web_sm
+
+COPY . .
+
+# Pre-cache Silero VAD etc. so the worker starts without a first-run download.
+RUN python agent.py download-files || true
+
+CMD ["python", "agent.py", "start"]

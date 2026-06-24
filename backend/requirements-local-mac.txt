@@ -1,0 +1,14 @@
+# On-device audio for engine=hybrid — macOS / Apple Silicon ONLY.
+# Installs MLX Whisper STT + Kokoro TTS for running the agent NATIVELY on a Mac
+# (see run_agent_local.sh, LOCAL_INFERENCE.md). mlx wheels are macOS-arm64 only, so
+# this file must NOT be used in the Linux Docker image — use requirements-local-linux.txt
+# there instead.
+#
+#   ./.venv/bin/python -m pip install -r requirements-local-mac.txt
+-r requirements.txt
+mlx
+mlx-whisper
+kokoro            # Kokoro-82M TTS (needs espeak-ng: `brew install espeak-ng`)
+soundfile
+numpy
+huggingface_hub

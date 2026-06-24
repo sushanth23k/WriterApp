@@ -7,6 +7,7 @@
 
 import { UnauthorizedError } from './auth';
 import { TOKEN_SERVER_URL } from './config';
+import type { Engine } from './engine';
 import type { Doc, Entry, FullDoc } from './types';
 
 export type TokenResult = {
@@ -16,15 +17,18 @@ export type TokenResult = {
   identity: string;
   mode: string | null;
   doc_id: string | null;
+  engine: string | null;
 };
 
 export async function fetchToken(
   mode: 'main' | 'note',
   jwt: string,
   docId?: string,
+  engine?: Engine,
 ): Promise<TokenResult> {
   const body: Record<string, unknown> = { mode };
   if (mode === 'note') body.doc_id = docId;
+  if (engine) body.engine = engine;
 
   const res = await fetch(`${TOKEN_SERVER_URL}/token`, {
     method: 'POST',

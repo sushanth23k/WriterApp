@@ -30,5 +30,11 @@ backend/notes.db
 # Local LiveKit dev config holds a dev secret — never commit
 backend/livekit.yaml
 
+# On-device model weights (STT/TTS) — large; downloaded per-machine via
+# scripts/download_models.sh, never committed. See backend/LOCAL_INFERENCE.md.
+models/
+# Smoke-test audio output
+backend/scripts/out/
+
 # macOS
 .DS_Store

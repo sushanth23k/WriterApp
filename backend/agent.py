@@ -606,8 +606,36 @@ async def _apply_doc_edit(ud: SessionMemory, data: bytes) -> None:
 # ---- entrypoint: route on room metadata ---------------------------------------
 
 
-def _build_session(userdata: SessionMemory) -> AgentSession[SessionMemory]:
-    """The shared Deepgram/Groq/Deepgram + Silero pipeline used by every mode."""
+def _build_session(
+    userdata: SessionMemory, engine: str = "cloud"
+) -> AgentSession[SessionMemory]:
+    """Build the STT->LLM->TTS + Silero VAD pipeline for the chosen engine.
+
+    ``cloud`` (default): Deepgram STT -> Groq llama-3.3-70b -> Deepgram TTS.
+    ``hybrid``: on-device MLX Whisper + Kokoro for audio, but Groq llama-3.3-70b for the
+    LLM — keeps the audio private while relying on the 70B for the reliable tool-calling
+    the whole app is built on.
+
+    The MLX audio models load lazily on first use and stay resident in the worker; the
+    local plugins are imported here, not at module top, so a cloud-only deploy without
+    MLX installed still runs.
+    """
+    if engine == "hybrid":
+        # On-device STT + TTS, cloud (Groq) LLM for dependable tool-calling. STT picks
+        # MLX on macOS and faster-whisper on Linux (Docker/GCP) — see stt/__init__.py.
+        from stt import make_local_stt
+        from tts.kokoro_tts import KokoroTTS
+
+        logger.info("building HYBRID session (on-device audio, Groq LLM)")
+        return AgentSession(
+            userdata=userdata,
+            vad=silero.VAD.load(),
+            stt=make_local_stt(),
+            llm=groq.LLM(model="llama-3.3-70b-versatile"),
+            tts=KokoroTTS(),
+        )
+
+    logger.info("building CLOUD (Deepgram/Groq) session")
     return AgentSession(
         userdata=userdata,
         vad=silero.VAD.load(),
@@ -627,9 +655,14 @@ async def entrypoint(ctx: JobContext) -> None:
     user_email = (meta.get("user") or "").strip().lower()
     mode = meta.get("mode") or "main"
     doc_id = meta.get("doc_id")
+    # Which inference stack to run: "local" (on-device MLX) or "cloud" (Deepgram/Groq).
+    # Stamped by the token server from the app's toggle; default cloud if absent.
+    engine = (meta.get("engine") or "cloud").strip().lower()
+    if engine not in ("cloud", "hybrid"):
+        engine = "cloud"
     logger.info(
-        "routing: room=%s user=%s mode=%s doc_id=%s",
-        ctx.job.room.name, user_email, mode, doc_id,
+        "routing: room=%s user=%s mode=%s doc_id=%s engine=%s",
+        ctx.job.room.name, user_email, mode, doc_id, engine,
     )
 
     if not user_email:
@@ -640,7 +673,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # The store is bound to this user so every note operation is scoped to them.
     store = NotesStore.from_env().for_user(user_email)
     userdata = SessionMemory(store=store, room=ctx.room, mode=mode, doc_id=doc_id)
-    session = _build_session(userdata)
+    session = _build_session(userdata, engine)
 
     if mode == "note":
         await _start_note(ctx, session, userdata)

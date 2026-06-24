@@ -1,0 +1,31 @@
+# Override that adds ON-DEVICE audio (engine=hybrid) to the local dev stack, in Docker.
+#
+# The base docker-compose.yml builds the CLOUD-only image (no kokoro / faster-whisper),
+# so picking "Hybrid" in the app there crashes with ModuleNotFoundError: kokoro. This
+# override rebuilds the agent from Dockerfile.local (faster-whisper STT + Kokoro TTS) and
+# bind-mounts the downloaded weights from ../models — the same setup the GCP VM uses, so
+# you can test Hybrid locally before deploying.
+#
+# Prereq (once):  bash ../scripts/download_models.sh   # fetches faster-whisper + kokoro
+#
+# Run:
+#   cd backend
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#
+# Then pick Cloud OR Hybrid in the app — this image supports both.
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    image: vma-backend-local:latest
+    environment:
+      # Keep the internal LiveKit URL from the base file, and add on-device config.
+      - LIVEKIT_URL=ws://livekit:7880
+      - MODELS_DIR=/models
+      - STT_BACKEND=faster
+      - HF_HUB_OFFLINE=1
+    volumes:
+      # Weights live on the host (git-ignored); mount them read-only into the agent.
+      # Note: the base file also mounts ./:/app for live code — both apply.
+      - ../models:/models:ro

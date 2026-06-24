@@ -1,0 +1,14 @@
+# On-device audio for engine=hybrid — Linux (GCP VM / Docker), CPU.
+# Installs faster-whisper STT (CTranslate2) + Kokoro TTS. This is the Linux sibling of
+# requirements-local-mac.txt (MLX has no Linux build). Used by Dockerfile.local.
+#
+# torch (a Kokoro dep) is installed SEPARATELY from the CPU wheel index in the
+# Dockerfile to avoid pulling the ~2 GB CUDA build — do that before this file:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch
+#   pip install -r requirements-local-linux.txt
+-r requirements.txt
+faster-whisper
+kokoro            # Kokoro-82M TTS (needs espeak-ng, installed via apt in the image)
+soundfile
+numpy
+huggingface_hub

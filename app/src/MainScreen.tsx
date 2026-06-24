@@ -18,6 +18,7 @@ import { useRoomContext } from '@livekit/react-native';
 
 import { createDoc, deleteDoc as apiDeleteDoc, listDocs } from './api';
 import { UnauthorizedError } from './auth';
+import type { Engine } from './engine';
 import { colors, radius, space, type } from './theme';
 import { TOPICS, type Doc } from './types';
 import { useConnState, useDataTopic, useMic, useTranscript } from './livekit';
@@ -27,10 +28,14 @@ export function MainScreen({
   token,
   onNavigate,
   onSignOut,
+  engine,
+  onSetEngine,
 }: {
   token: string;
   onNavigate: (docId: string, title: string) => void;
   onSignOut: () => void;
+  engine: Engine;
+  onSetEngine: (e: Engine) => void;
 }) {
   const room = useRoomContext();
   const [docs, setDocs] = useState<Doc[]>([]);
@@ -129,6 +134,29 @@ export function MainScreen({
         >
           <Text style={styles.newBtnText}>＋  New note</Text>
         </Pressable>
+      </View>
+
+      {/* Inference engine. Switching reconnects the session with the chosen stack:
+            Cloud  — Deepgram STT + Groq LLM + Deepgram TTS
+            Hybrid — on-device STT/TTS, Groq LLM (private audio, reliable tools) */}
+      <View style={styles.engineRow}>
+        <Text style={styles.engineLabel}>VOICE ENGINE</Text>
+        <View style={styles.segment}>
+          {(['cloud', 'hybrid'] as const).map((opt) => {
+            const active = engine === opt;
+            return (
+              <Pressable
+                key={opt}
+                onPress={() => onSetEngine(opt)}
+                style={[styles.segmentBtn, active && styles.segmentBtnActive]}
+              >
+                <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+                  {opt === 'cloud' ? 'Cloud' : 'Hybrid'}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
       </View>
 
       <SectionLabel>
@@ -256,6 +284,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   newBtnText: { ...type.bodyStrong, color: colors.text },
+  engineRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: space.lg,
+  },
+  engineLabel: { ...type.label, color: colors.textDim },
+  segment: {
+    flexDirection: 'row',
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    padding: 2,
+  },
+  segmentBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: radius.pill,
+  },
+  segmentBtnActive: { backgroundColor: colors.accent },
+  segmentText: { ...type.label, color: colors.textDim },
+  segmentTextActive: { color: '#0B0F14' },
   emptyWrap: { flexGrow: 1, justifyContent: 'center' },
   empty: {
     ...type.body,
